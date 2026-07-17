@@ -1,0 +1,131 @@
+/* =============================================================================
+ * glass.css — MiniAgent 玻璃拟态主题（对齐 page-pet 视觉语言）
+ * -----------------------------------------------------------------------------
+ * 做法：保留 antd 组件，仅用 CSS 把其覆盖成 page-pet 的玻璃风。
+ * 所有规则挂在 #miniagent-root 下，用 id 提升特异性压过 antd v5 运行时样式。
+ * ========================================================================== */
+
+#miniagent-root, #miniagent-root * { box-sizing: border-box; }
+#miniagent-root {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #1a1c22;
+}
+
+/* ---------- 浮窗根：玻璃卡片 ---------- */
+#miniagent-root .ma-panel.ant-card {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.62), rgba(255, 255, 255, 0.42));
+  -webkit-backdrop-filter: blur(16px);
+          backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  border-radius: 16px;
+  box-shadow: 0 16px 40px rgba(20, 22, 35, 0.18);
+  overflow: hidden;
+}
+#miniagent-root .ma-panel .ant-card-head {
+  background: transparent;
+  border-bottom: 0.5px solid rgba(255, 255, 255, 0.5);
+  min-height: 44px;
+  padding: 0 14px;
+}
+#miniagent-root .ma-panel .ant-card-head-title { font-weight: 600; }
+#miniagent-root .ma-panel .ant-card-body { background: transparent; }
+
+/* ---------- 气泡（对齐 page-pet .pc-bubble） ---------- */
+#miniagent-root .ma-bubble {
+  max-width: 80%;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 0.5px solid rgba(255, 255, 255, 0.5);
+  box-shadow: 0 8px 24px rgba(20, 22, 35, 0.10);
+  -webkit-backdrop-filter: blur(10px);
+          backdrop-filter: blur(10px);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+  font-size: 14px;
+  white-space: pre-wrap;
+}
+#miniagent-root .ma-bubble.user {
+  background: linear-gradient(180deg, rgba(229, 242, 255, 0.88), rgba(214, 234, 255, 0.72));
+  color: #1a1c22;
+}
+#miniagent-root .ma-bubble.ai {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0.28));
+  color: #1a1c22;
+}
+
+/* ---------- 玻璃输入框 ---------- */
+#miniagent-root .ma-input.ant-input {
+  background: rgba(255, 255, 255, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  border-radius: 10px;
+  color: #1a1c22;
+}
+#miniagent-root .ma-input.ant-input::placeholder { color: #9aa0b3; }
+#miniagent-root .ma-input.ant-input:focus,
+#miniagent-root .ma-input.ant-input-focused {
+  background: rgba(255, 255, 255, 0.55);
+  border-color: #3b6fd4;
+  box-shadow: 0 0 0 2px rgba(59, 111, 212, 0.15);
+}
+
+/* ---------- 工具卡片（对齐 page-pet .pc-tool-card） ---------- */
+#miniagent-root .ma-tool-card {
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(150, 160, 190, 0.45);
+  background: rgba(238, 242, 255, 0.78);
+  -webkit-backdrop-filter: blur(14px);
+          backdrop-filter: blur(14px);
+  box-shadow: 0 12px 32px rgba(40, 50, 90, 0.16);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+}
+#miniagent-root .ma-tool-badge {
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: 999px;
+  color: #5a6275;
+  background: rgba(120, 130, 160, 0.16);
+}
+#miniagent-root .ma-tool-badge.running { color: #b06a00; background: rgba(255, 180, 60, 0.20); }
+#miniagent-root .ma-tool-badge.done { color: #2f7d4f; background: rgba(60, 160, 100, 0.16); }
+#miniagent-root .ma-tool-badge.error { color: #c0392b; background: rgba(192, 57, 43, 0.14); }
+#miniagent-root .ma-tool-result {
+  margin: 0;
+  max-height: 160px;
+  overflow: auto;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #3a3f55;
+  background: rgba(255, 255, 255, 0.55);
+  border-radius: 8px;
+  padding: 6px 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* ---------- 错误条：对齐 page-pet 兜底琥珀色（.pc-fallback） ---------- */
+#miniagent-root .ant-alert-error {
+  background: linear-gradient(180deg, rgba(255, 244, 224, 0.94), rgba(255, 236, 200, 0.80));
+  border: 1px solid rgba(214, 158, 60, 0.5);
+  color: #7a5a1a;
+}
+#miniagent-root .ant-alert-error .ant-alert-message { color: #7a5a1a; }
+
+/* ---------- 设置弹窗玻璃化（对齐 page-pet 玻璃面板） ---------- */
+#miniagent-root .ant-modal-content,
+#miniagent-root .ant-modal-header {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(255, 255, 255, 0.66));
+  -webkit-backdrop-filter: blur(16px);
+          backdrop-filter: blur(16px);
+  border-radius: 16px;
+}
+#miniagent-root .ant-modal-header { border-bottom: 0.5px solid rgba(255, 255, 255, 0.5); }
+#miniagent-root .ant-modal-content { box-shadow: 0 16px 40px rgba(20, 22, 35, 0.22); }
+#miniagent-root .ant-modal-mask { background: rgba(20, 22, 35, 0.18); backdrop-filter: blur(2px); }
