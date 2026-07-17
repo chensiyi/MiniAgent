@@ -2,7 +2,7 @@ import { useCallback, useState } from 'react';
 import { AIMessage, HumanMessage } from '@langchain/core/messages';
 import type { ChatMessage, ToolCall } from '../view/types';
 import { createLLM } from './llm';
-import { hasApiKey } from '../model/config';
+import { getConfig } from '../model/config';
 
 // React 思路编排：把输入 → LLM 流式应答直接串进消息状态（本期纯对话，tools 留后续阶段）
 export function useAgent() {
@@ -13,7 +13,7 @@ export function useAgent() {
 
   const send = useCallback(
     async (text: string) => {
-      if (!hasApiKey()) {
+      if (!getConfig().apiKey) {
         setError('未配置 API Key，请点右上角「设置」填入');
         return;
       }

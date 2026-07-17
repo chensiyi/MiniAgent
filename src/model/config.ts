@@ -26,7 +26,3 @@ export function getConfig(): AppConfig {
 export function saveConfig(patch: Partial<AppConfig>): void {
   GM_setValue(KEY, JSON.stringify({ ...getConfig(), ...patch }));
 }
-
-export function hasApiKey(): boolean {
-  return !!getConfig().apiKey;
-}
