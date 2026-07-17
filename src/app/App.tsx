@@ -20,6 +20,7 @@ export default function App() {
           toolCalls={agent.toolCalls}
           onSend={agent.send}
           running={agent.running}
+          error={agent.error}
         />
       </div>
     </ConfigProvider>
