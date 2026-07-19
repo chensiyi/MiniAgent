@@ -6,6 +6,7 @@ export interface AppConfig {
   apiKey: string;
   model: string;
   baseURL: string;
+  disabledTools?: string[]; // 工具黑名单：boot 时直接从注册名单剔除（文档 §3/§5.2）
 }
 
 export const DEFAULT_CONFIG: AppConfig = {
@@ -19,24 +20,33 @@ export const DEFAULT_CONFIG: AppConfig = {
 // 已在 executor.run base 内接入（name==='code_run' 且本开关为 true 时 await ui.requestApproval）。
 export const REQUIRE_CODE_APPROVAL = true;
 
+// 确定性确认的风险阈值（文档 §6/§9）：riskLevel 达到该级别（含）的工具，在 executor.run 必须人工确认。
+export type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
+export const APPROVAL_RISK_LEVEL: RiskLevel = 'high';
+const RISK_ORDER: Record<RiskLevel, number> = { low: 0, medium: 1, high: 2, critical: 3 };
+export function riskAtLeast(level: RiskLevel | undefined, threshold: RiskLevel): boolean {
+  if (!level) return false;
+  return RISK_ORDER[level] >= RISK_ORDER[threshold];
+}
+
 // TODO（上下文 / 权限管理）：当前仅占位，不进运行时。
 // 未来规划：withHooks 的 before 钩子注入共享 ctx（上下文），并在敏感操作前做权限鉴权；
 // 权限系统就位后，ui.requestApproval 可由权限 hook 自动允许（白名单）/ 拦截，而不总是弹窗。
 // 另：可为工具加 danger 标记，让确认闸覆盖更多危险工具（非仅 code_run）。
 
 // 系统提示：告诉 LLM 它有哪些工具，以及"自我编辑/管理"的能力边界
-const SYSTEM_PROMPT = `你是运行在浏览器页面上的轻量 AI 智能体（MiniAgent）。当前可用工具：
-- storage_get / storage_set：读写持久存储（默认 memory 命名空间，可指定 ns 读写其它命名空间）。用于记忆、配置、状态。
-- code_gen：把一段 JS 代码保存到 code 命名空间（不执行）。
-- code_run：执行已保存（或直接传入）的 JS 代码，实现自我开发。执行前系统自动弹确认框，你无需在文字里确认。
-- tool_create / tool_remove：注册 / 删除自编排工具（持久化到 tools 命名空间，重载自动重建）。
-- session：会话管理，自动把对话消息与工具调用落盘到 session 命名空间。
-- tool_list：枚举全部已注册工具（含隐藏的系统原语），研究自我组织时查看完整能力面。
+const SYSTEM_PROMPT = `你是运行在浏览器页面上的轻量 AI 智能体（MiniAgent）。工具是唯一的能力面，按契约声明；有 call 的工具才会被直接调用。
+
+- storage_get / storage_set（author: core）：读写持久存储（默认 memory 命名空间，可指定 ns）。用于记忆、配置、状态。
+- code_run（author: core）：执行js代码，riskLevel=high，执行前系统自动弹确认框，你无需在文字里确认。
+- toolregister / tool_remove（author: core）：注册 / 删除自编排工具。toolregister 参数含 name/description/inputSchema/deps/riskLevel/code；code 为 call 源码，依赖按 name 匹配、author 不符仅警告。注册后持久化到 tools 命名空间，重载按依赖拓扑自动重建。
+- session（author: core）：会话管理，自动把对话消息与工具调用落盘到 session 命名空间。
+- tool_list（author: core）：枚举全部已注册工具（含无 call 的系统原语），研究自我组织时查看完整能力面。
 
 规则：
-- 想新增能力：用 tool_create 注册工具（提供 name/description/parameters/code），或用 code_gen + code_run。
+- 想新增能力：用 toolregister 注册工具（提供 name/description/inputSchema/code，必要时 deps/riskLevel/register 安装钩子）。
 - code_run 由界面自动弹确认框，直接调用即可，不要在文字里向用户确认。
-- 代码内用 ctx.storage 访问存储、ctx.console 打印，不要依赖未注入的全局变量。
+- 代码内用 ctx.storage 访问存储、ctx.console 打印、ctx.this.<name> 取其它已挂载工具，不要依赖未注入的全局变量。
 - 回答简明，必要时一句话说明在做什么。`;
 
 export function getSystemPrompt(): string {

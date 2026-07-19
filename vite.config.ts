@@ -12,7 +12,7 @@ export default defineConfig({
         namespace: 'https://github.com/chensiyi/MiniAgent',
         description: '极简 userScript 智能体（原生 DOM + GM 桥接 LLM）',
         match: ['*://*/*'], // 注入范围（后续脚本管理可控）
-        grant: ['GM_addStyle', 'GM_setValue', 'GM_getValue', 'GM_deleteValue', 'GM_listValues', 'GM_xmlhttpRequest'],
+        grant: ['GM_addStyle', 'GM_setValue', 'GM_getValue', 'GM_deleteValue', 'GM_listValues', 'GM_xmlhttpRequest', 'unsafeWindow'],
         connect: ['*'], // 直连 LLM 域名（动态）；后续脚本管理可收敛
       },
     }),

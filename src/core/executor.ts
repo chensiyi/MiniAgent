@@ -1,14 +1,17 @@
 import { storage } from './storage';
 import { ui } from '../ui/ui';
-import { REQUIRE_CODE_APPROVAL } from '../model/config';
+import { REQUIRE_CODE_APPROVAL, APPROVAL_RISK_LEVEL, riskAtLeast, getConfig, saveConfig } from '../model/config';
 import { withHooks, type HookedFunction } from './withHooks';
 
 // executor 的结构化视图（避免 typeof executor 前向引用）
 export interface ExecutorLike {
   attachAgent(a: AgentLike): void;
-  register(tool: ToolDef): void;
+  register(tool: ToolDef): boolean;
   unregister(name: string): void;
-  list(includeHidden?: boolean): ToolDef[];
+  registerAll(tools: ToolDef[]): { registered: string[]; rejected: string[] };
+  list(includeAll?: boolean): ToolDef[];
+  setEnabled(name: string, enabled: boolean): void;
+  allToolStates(): { name: string; author?: string; enabled: boolean; builtin: boolean }[];
   run(call: ToolCall, agentArg?: AgentLike): Promise<string>;
 }
 
@@ -21,6 +24,7 @@ export interface AgentLike {
   llm: any;
   executor: ExecutorLike;
   bus: any;
+  tools: Map<string, ToolDef>; // 按名挂载的权威表（文档 §5.2）
   sendMessage: ((text: string) => Promise<void>) & HookedFunction;
 }
 
@@ -29,35 +33,50 @@ export interface RunCtx {
   storage: typeof storage;
   executor: ExecutorLike;
   agent: AgentLike;
-  console: Console;
+  this: AgentLike; // 注册器（Agent 自身）；工具可经 this.<name> 取其它已挂载工具
+  console: Console; // 沙箱打印（ctx.console）
 }
 
-// 工具注册上下文：onRegister / onUnregister 安装或还原编排。
+// 工具注册上下文：register/unregister 安装或还原编排，并注入 this(=Agent)（文档 §5.1）。
 export interface RegisterCtx {
   storage: typeof storage;
   executor: ExecutorLike;
   agent: AgentLike;
+  this: AgentLike;
 }
 
-// 可被 LLM 调用的工具定义（OpenAI tool schema 子集）+ 编排钩子
+// 依赖引用（文档 §5/§8）：唯一识别标识 = name + author
+export interface DepRef {
+  name: string;
+  author?: string;
+  version?: string;
+}
+
+// 可被 LLM 调用的工具定义（文档 §8 工具契约）
 export interface ToolDef {
   name: string;
+  author?: string; // 唯一标识组成（与 name 组合）
   description: string;
-  parameters: Record<string, unknown>; // JSON Schema
-  hidden?: boolean; // 系统/内部原语：不进常规 tools 载荷，但常驻 list（经 tool_list 可见）
-  run: (args: Record<string, unknown>, ctx: RunCtx) => Promise<string> | string;
-  onRegister?: (ctx: RegisterCtx) => void | Promise<void>; // 安装 / 重建入口
-  onUnregister?: (ctx: RegisterCtx) => void | Promise<void>; // 卸载 / 还原入口
+  inputSchema: Record<string, unknown>; // JSON Schema（文档称 inputSchema；校验 + 防注入）
+  deps?: DepRef[]; // 前置依赖：按 name 匹配；author 不符→警告可继续（§5）
+  riskLevel?: 'low' | 'medium' | 'high' | 'critical'; // 高危走确定性确认（§6/§9；阶段2接线）
+  call?: (args: Record<string, unknown>, ctx: RunCtx) => Promise<string> | string; // 执行入口；有 call 才进 LLM 清单（§7）
+  register?: (ctx: RegisterCtx) => void | Promise<void>; // 安装 / 重建入口（文档 register(ctx)）
+  unregister?: (ctx: RegisterCtx) => void | Promise<void>; // 卸载 / 还原入口
 }
 
-// 自编排工具的持久化描述符（可 JSON 序列化）
+// 自编排工具的持久化描述符（可 JSON 序列化；tools 命名空间为真相源）
 export interface ToolDesc {
   name: string;
+  author?: string;
   description: string;
-  parameters: Record<string, unknown>;
-  code: string; // run 源码：(args, ctx) => string
-  onRegister?: string; // 可选：安装源码 (ctx) => void
-  hidden?: boolean;
+  inputSchema: Record<string, unknown>;
+  deps?: DepRef[];
+  riskLevel?: 'low' | 'medium' | 'high' | 'critical';
+  code: string; // call 源码：(args, ctx) => string
+  register?: string; // 可选：安装源码 (ctx) => void
+  unregister?: string; // 可选：卸载源码 (ctx) => void
+  enabled?: boolean; // 启停状态（§3：关闭项留 ns、不注册）
 }
 
 // LLM 实际发出的调用（tool_calls 解析后的产物）
@@ -67,106 +86,235 @@ export interface ToolCall {
   args: Record<string, unknown>;
 }
 
+// agent 上的保留属性名：挂载 agent[name] 时跳过，避免覆盖核心方法/状态
+const RESERVED = new Set<string>([
+  'messages', 'messageQueue', 'toolCallQueue', 'sessionId', 'storage', 'llm',
+  'executor', 'bus', '_engineActive', 'isRunning', 'chatStop', 'engine',
+  'sendMessage', 'chat', 'tools', 'orchestrateSystemPrompt',
+]);
+
 const registry = new Map<string, ToolDef>();
 let _agent: AgentLike | null = null;
 
-// 把源码串编译成函数（run / onRegister 共用沙箱编译）。剥离末尾分号避免语法错误。
+// 把源码串编译成函数（call / register / unregister 共用沙箱编译）。剥离末尾分号避免语法错误。
 function compileFn(code: string): (...a: any[]) => any {
   const c = code.trim().replace(/;\s*$/, '');
   const fn = new Function('"use strict"; return (' + c + ');');
   return fn() as (...a: any[]) => any;
 }
 
-// 由持久化描述符构造最小 ToolDef：run 永远由 code 编译（重建即重编译）；onRegister 可选。
+// 由持久化描述符构造最小 ToolDef：call 永远由 code 编译（重建即重编译）；register/unregister 可选。
 export function buildToolFromDesc(desc: ToolDesc): ToolDef {
-  const run = compileFn(desc.code) as (args: Record<string, unknown>, ctx: RunCtx) => string;
+  const call = compileFn(desc.code) as (args: Record<string, unknown>, ctx: RunCtx) => string;
   const tool: ToolDef = {
     name: desc.name,
+    author: desc.author,
     description: desc.description,
-    parameters: desc.parameters,
-    hidden: !!desc.hidden,
-    run,
+    inputSchema: desc.inputSchema,
+    deps: desc.deps,
+    riskLevel: desc.riskLevel,
+    call,
   };
-  if (desc.onRegister) {
-    tool.onRegister = compileFn(desc.onRegister) as (ctx: RegisterCtx) => void;
-  }
+  if (desc.register) tool.register = compileFn(desc.register) as (ctx: RegisterCtx) => void;
+  if (desc.unregister) tool.unregister = compileFn(desc.unregister) as (ctx: RegisterCtx) => void;
   return tool;
 }
 
-// 解析 code_run 要执行的代码：优先 code:<name>，否则直接用 args.code
-function getCode(args: Record<string, unknown>, ctx: RunCtx): string {
-  const name = String(args.name ?? '');
-  const direct = String(args.code ?? '');
-  if (name) return ctx.storage.get<string>('code', name) ?? '';
-  return direct;
+// 依赖校验（按 name 匹配；缺失→拒绝；author 不符→收集警告但可继续，§5）
+function checkDeps(tool: ToolDef): { ok: boolean; warns: string[] } {
+  const warns: string[] = [];
+  for (const dep of tool.deps ?? []) {
+    const dt = registry.get(dep.name);
+    if (!dt) return { ok: false, warns }; // 依赖未就绪 → 拒绝
+    if (dep.author && dt.author && dt.author !== dep.author) {
+      warns.push(`依赖 ${dep.name} 的 author 不符（期望 ${dep.author}，实际 ${dt.author}）`);
+    }
+  }
+  return { ok: true, warns };
+}
+
+// 拓扑排序：在 batch ∪ 已注册 上建依赖图，解出"依赖在前"的顺序；环→拒绝（§5.2）
+function topoSort(tools: ToolDef[]): { ordered: ToolDef[]; error?: string } {
+  const byName = new Map<string, ToolDef>();
+  for (const t of tools) byName.set(t.name, t);
+  const color = new Map<string, 0 | 1 | 2>(); // 0 未访问, 1 在栈, 2 完成
+  const order: ToolDef[] = [];
+  let cycleErr: string | undefined;
+
+  const visit = (t: ToolDef, stack: string[]): void => {
+    if (cycleErr) return;
+    const c = color.get(t.name) ?? 0;
+    if (c === 2) return;
+    if (c === 1) {
+      cycleErr = `循环依赖: ${[...stack, t.name].join(' → ')}`;
+      return;
+    }
+    color.set(t.name, 1);
+    for (const dep of t.deps ?? []) {
+      const dt = byName.get(dep.name);
+      if (dt) visit(dt, [...stack, t.name]); // 仅 batch 内依赖参与排序；已注册的视为就绪
+    }
+    color.set(t.name, 2);
+    order.push(t);
+  };
+
+  for (const t of tools) visit(t, []);
+  if (cycleErr) return { ordered: [], error: cycleErr };
+  return { ordered: order };
 }
 
 export const executor = {
-  // 绑定 agent 引用（init 时调用一次），供 register/unregister 的 onRegister 构建 ctx。
+  // 绑定 agent 引用（init 时调用一次），供 register/unregister 构建 ctx 与按名挂载。
   attachAgent(a: AgentLike): void {
     _agent = a;
   },
 
-  // 注册：写表 → onRegister（注册即"安装/重建"）。同名注册先 onUnregister 旧的再 onRegister 新的。
-  register(tool: ToolDef): void {
-    const existing = registry.get(tool.name);
-    if (existing?.onUnregister && _agent) {
+  // 注册单个工具：author 冲突→警告不覆盖；依赖缺失→拒绝；依赖 author 不符→警告可继续。
+  // 先挂载（agent.tools + agent[name]）再 install，保证 tool.register 内能经 this.<dep> 取到依赖。
+  // 返回 true=已注册 / false=被拒。
+  register(tool: ToolDef): boolean {
+    const name = tool.name;
+    const existing = registry.get(name);
+    // author 冲突：同名不同 author → 警告 + 不覆盖（§5：不静默覆盖）
+    if (existing && tool.author && existing.author && existing.author !== tool.author) {
+      console.warn(`[MiniAgent] 工具名冲突（author 不符，跳过覆盖）: ${name}（已有 ${existing.author}，新 ${tool.author}）`);
+      return false;
+    }
+    // 依赖校验
+    const { ok, warns } = checkDeps(tool);
+    for (const w of warns) console.warn('[MiniAgent]', w);
+    if (!ok) {
+      console.warn(`[MiniAgent] 工具注册被拒绝（依赖缺失）: ${name}`, tool.deps);
+      return false;
+    }
+    // 同名重注册：先卸载旧的（触发其 unregister 还原编排）
+    if (existing && existing.unregister && _agent) {
       try {
-        existing.onUnregister({ storage, executor, agent: _agent });
+        existing.unregister({ storage, executor, agent: _agent, this: _agent });
       } catch (e) {
-        console.warn('[MiniAgent] onUnregister 失败:', tool.name, e);
+        console.warn('[MiniAgent] unregister 失败:', name, e);
       }
     }
-    registry.set(tool.name, tool);
-    if (tool.onRegister && _agent) {
+    // 挂载（先于 install）
+    registry.set(name, tool);
+    if (_agent) {
+      _agent.tools.set(name, tool);
+      if (!RESERVED.has(name)) (_agent as unknown as Record<string, unknown>)[name] = tool;
+    }
+    // 安装（register(ctx)）
+    if (tool.register && _agent) {
       try {
-        tool.onRegister({ storage, executor, agent: _agent });
+        tool.register({ storage, executor, agent: _agent, this: _agent });
       } catch (e) {
-        console.warn('[MiniAgent] onRegister 失败:', tool.name, e);
+        console.warn('[MiniAgent] register 失败:', name, e);
       }
     }
+    return true;
   },
 
-  // 注销：onUnregister（还原编排）→ 删表
+  // 注销：unregister（还原编排）→ 删表 + 取消挂载
   unregister(name: string): void {
     const tool = registry.get(name);
     if (!tool) return;
-    if (tool.onUnregister && _agent) {
+    if (tool.unregister && _agent) {
       try {
-        tool.onUnregister({ storage, executor, agent: _agent });
+        tool.unregister({ storage, executor, agent: _agent, this: _agent });
       } catch (e) {
-        console.warn('[MiniAgent] onUnregister 失败:', name, e);
+        console.warn('[MiniAgent] unregister 失败:', name, e);
       }
     }
     registry.delete(name);
+    if (_agent) {
+      _agent.tools.delete(name);
+      const mounted = (_agent as unknown as Record<string, unknown>)[name];
+      if (!RESERVED.has(name) && mounted === tool) delete (_agent as unknown as Record<string, unknown>)[name];
+    }
   },
 
-  // 列举：默认只返回非隐藏（喂给 LLM）；includeHidden=true 返回全量（tool_list / 系统提示用）
-  list(includeHidden = false): ToolDef[] {
+  // 批量注册：先拓扑排序（依赖在前）再按序注册（§5.2：先排序再注册）；环→整体拒绝。
+  registerAll(tools: ToolDef[]): { registered: string[]; rejected: string[] } {
+    const { ordered, error } = topoSort(tools);
+    if (error) {
+      console.warn('[MiniAgent] 依赖拓扑排序失败，全部拒绝:', error);
+      return { registered: [], rejected: tools.map((t) => t.name) };
+    }
+    const registered: string[] = [];
+    const rejected: string[] = [];
+    for (const t of ordered) {
+      if (executor.register(t)) registered.push(t.name);
+      else rejected.push(t.name);
+    }
+    return { registered, rejected };
+  },
+
+  // 列举：默认只返回有 call 的工具（进 LLM tool_call 清单，§7）；includeAll=true 返回全量（tool_list / 系统提示用）。
+  list(includeAll = false): ToolDef[] {
     const all = [...registry.values()];
-    return includeHidden ? all : all.filter((t) => !t.hidden);
+    return includeAll ? all : all.filter((t) => typeof t.call === 'function');
+  },
+
+  // 启停：自编排工具改 tools:<name>.enabled 并持久化；内置工具改 config.disabledTools 黑名单并持久化；均即时 register/unregister。
+  setEnabled(name: string, enabled: boolean): void {
+    const desc = storage.get<ToolDesc>('tools', name);
+    if (desc) {
+      desc.enabled = enabled;
+      storage.set('tools', name, desc);
+    } else {
+      const cfg = getConfig();
+      const set = new Set(cfg.disabledTools ?? []);
+      if (enabled) set.delete(name);
+      else set.add(name);
+      saveConfig({ disabledTools: [...set] });
+    }
+    if (enabled) {
+      if (desc) {
+        try {
+          executor.register(buildToolFromDesc(desc));
+        } catch (e) {
+          console.warn('[MiniAgent] 重注册失败:', name, e);
+        }
+      } else {
+        const bt = defaultTools.find((t) => t.name === name);
+        if (bt) executor.register(bt);
+      }
+    } else {
+      executor.unregister(name);
+    }
+  },
+
+  // 全量工具状态（含启用态），供 chat_ui 启停面板渲染（文档 §3 三视图）。
+  allToolStates(): { name: string; author?: string; enabled: boolean; builtin: boolean }[] {
+    const registered = new Set(registry.keys());
+    const states: { name: string; author?: string; enabled: boolean; builtin: boolean }[] = [];
+    for (const t of defaultTools) {
+      states.push({ name: t.name, author: t.author, enabled: registered.has(t.name), builtin: true });
+    }
+    for (const desc of storage.listToolDefs()) {
+      if (states.some((s) => s.name === desc.name)) continue;
+      states.push({ name: desc.name, author: desc.author, enabled: desc.enabled !== false, builtin: false });
+    }
+    return states;
   },
 
   // 执行一个工具调用，返回"观察结果"文本，回灌给 LLM 作为 tool 消息。
-  // code_run 确认闸在 base 内（自检 name → 需要时 await ui.requestApproval）。
-  // ctx.agent 由调用方（engine）注入，避免 executor 依赖 agent。
+  // 危险工具确认闸在 base 内（code_run 或 riskLevel≥high/critical 时 await ui.requestApproval）。
+  // ctx.agent / ctx.this 由调用方（engine）注入，避免 executor 依赖 agent。
   run: withHooks(async (call: ToolCall, agentArg?: AgentLike): Promise<string> => {
     const tool = registry.get(call.name);
     if (!tool) return `未知工具: ${call.name}`;
+    if (typeof tool.call !== 'function') return `工具 ${call.name} 无 call 入口（不可直接调用）`;
 
-    // 危险工具确认闸（放 base，可热插拔把控流程）
-    if (call.name === 'code_run') {
-      const code = getCode(call.args, { storage, executor, agent: agentArg ?? _agent!, console });
-      if (!code) return '没有可执行的代码';
-      if (REQUIRE_CODE_APPROVAL) {
-        const ok = await ui.requestApproval({ name: call.name, code });
-        if (!ok) return '用户拒绝了代码执行';
-      }
+    // 确定性确认闸（高危 = 不由模型判断风险；阈值可配，文档 §6/§9）
+    const needApproval =
+      REQUIRE_CODE_APPROVAL && (call.name === 'code_run' || riskAtLeast(tool.riskLevel, APPROVAL_RISK_LEVEL));
+    if (needApproval) {
+      const code = call.args.code;
+      const ok = await ui.requestApproval({ name: call.name, code, riskLevel: tool.riskLevel });
+      if (!ok) return '用户拒绝了执行';
     }
-
-    const ctx: RunCtx = { storage, executor, agent: agentArg ?? _agent!, console };
+    const ctx: RunCtx = { storage, executor, agent: agentArg ?? _agent!, this: agentArg ?? _agent!, console };
     try {
-      const result = await tool.run(call.args ?? {}, ctx);
+      const result = await tool.call(call.args ?? {}, ctx);
       return typeof result === 'string' ? result : JSON.stringify(result);
     } catch (e) {
       return `工具执行错误: ${e instanceof Error ? e.message : String(e)}`;
@@ -182,18 +330,22 @@ export const executor = {
     return results;
   }),
 
-  // 重建自编排工具：遍历 tools 命名空间下的描述符 → 构造 ToolDef → register（→ onRegister 重建）。
-  // 没有独立的 rehydrate 例程：重建逻辑天然写在各工具的 onRegister 里，注册即重建。
+  // 重建自编排工具：读 tools 命名空间全部描述符 → 过滤启用项 → 构造 ToolDef → registerAll（拓扑序）。
+  // 没有独立的 rehydrate 例程：重建逻辑天然写在各工具的 register 里，注册即重建。
   rehydrateTools(): void {
-    for (const name of storage.keys('tools')) {
-      const desc = storage.get<ToolDesc>('tools', name);
-      if (!desc) continue;
+    const descs = storage.listToolDefs();
+    const tools: ToolDef[] = [];
+    for (const desc of descs) {
+      if (desc.enabled === false) continue; // §3：关闭项不进 boot
       try {
-        executor.register(buildToolFromDesc(desc));
+        tools.push(buildToolFromDesc(desc));
       } catch (e) {
-        console.warn('[MiniAgent] 重建工具失败:', name, e);
+        console.warn('[MiniAgent] 重建工具失败:', desc.name, e);
       }
     }
+    const { registered, rejected } = executor.registerAll(tools);
+    if (rejected.length) console.warn('[MiniAgent] 部分工具未注册（依赖缺失/循环）:', rejected);
+    else console.log('[MiniAgent] 重建工具:', registered);
   },
 };
 
@@ -213,8 +365,9 @@ function genSessionId(): string {
 // 1) 读取存储（默认 memory 命名空间，可指定其它）
 const storageGetTool: ToolDef = {
   name: 'storage_get',
+  author: 'core',
   description: '读取持久存储中此前写入的键值（默认 memory 命名空间，可指定其它命名空间）。用于回忆记忆、配置、历史。',
-  parameters: {
+  inputSchema: {
     type: 'object',
     properties: {
       key: { type: 'string', description: '键名' },
@@ -222,7 +375,7 @@ const storageGetTool: ToolDef = {
     },
     required: ['key'],
   },
-  run: (args, ctx) => {
+  call: (args, ctx) => {
     const key = String(args.key ?? '');
     if (!key) return '参数 key 缺失';
     const ns = String(args.ns ?? 'memory');
@@ -234,8 +387,9 @@ const storageGetTool: ToolDef = {
 // 2) 写入存储（默认 memory 命名空间，可指定其它）
 const storageSetTool: ToolDef = {
   name: 'storage_set',
+  author: 'core',
   description: '写入一个键值到持久存储（默认 memory 命名空间）。可用于保存记忆、配置、偏好。',
-  parameters: {
+  inputSchema: {
     type: 'object',
     properties: {
       key: { type: 'string', description: '键名' },
@@ -244,7 +398,7 @@ const storageSetTool: ToolDef = {
     },
     required: ['key', 'value'],
   },
-  run: (args, ctx) => {
+  call: (args, ctx) => {
     const key = String(args.key ?? '');
     if (!key) return '参数 key 缺失';
     const ns = String(args.ns ?? 'memory');
@@ -253,41 +407,21 @@ const storageSetTool: ToolDef = {
   },
 };
 
-// 3) 生成代码：存到 code 命名空间（不执行）
-const codeGenTool: ToolDef = {
-  name: 'code_gen',
-  description: '把一段 JS 代码以给定名称保存到 code 命名空间，供后续 code_run 执行。不会立即运行。',
-  parameters: {
-    type: 'object',
-    properties: {
-      name: { type: 'string', description: '代码片段名称，存储键 code:<name>' },
-      code: { type: 'string', description: 'JS 源码，可调用 ctx.storage / ctx.console 等沙箱对象' },
-    },
-    required: ['name', 'code'],
-  },
-  run: (args, ctx) => {
-    const name = String(args.name ?? '');
-    const code = String(args.code ?? '');
-    if (!name) return '参数 name 缺失';
-    ctx.storage.set('code', name, code);
-    return `已生成代码 ${name}（未执行）`;
-  },
-};
-
 // 4) 运行代码：自我开发执行入口，经人工确认闸（executor.run base 内）
 const codeRunTool: ToolDef = {
   name: 'code_run',
-  description: '执行先前 code_gen 保存（或直接传入）的 JS 代码。危险操作，执行前会请求用户确认。',
-  parameters: {
+  author: 'core',
+  riskLevel: 'high',
+  description: '执行JS代码。危险操作，执行前会请求用户确认。',
+  inputSchema: {
     type: 'object',
     properties: {
-      name: { type: 'string', description: '可选：执行 code:<name> 中保存的代码' },
-      code: { type: 'string', description: '可选：直接传入要执行的 JS 源码' },
+      code: { type: 'string', description: '直接传入要执行的 JS 源码' },
     },
   },
-  run: (args, ctx) => {
-    const code = getCode(args, ctx);
-    if (!code) return '没有可执行的代码';
+  call: (args, ctx) => {
+    const code = args.code as string;
+    if (!code|| code.length === 0) return '没有可执行的代码';
     try {
       const fn = new Function('ctx', `"use strict";\n${code}`);
       const result = fn(ctx);
@@ -298,33 +432,39 @@ const codeRunTool: ToolDef = {
   },
 };
 
-// 5) 注册自编排工具（持久化 + 注册 → onRegister 重建）
-const toolCreateTool: ToolDef = {
-  name: 'tool_create',
+// 5) 注册自编排工具（持久化 + 注册 → register 重建）；对齐文档 toolregister 语义
+const toolRegisterTool: ToolDef = {
+  name: 'toolregister',
+  author: 'core',
   description:
-    '注册一个新工具（自编排）：持久化到 tools 命名空间，重载后自动重建。参数 code 为 run 源码 (args, ctx) => string；onRegister 可选为安装源码 (ctx) => void。',
-  parameters: {
+    '注册一个新工具（自编排）：持久化到 tools 命名空间（系统真相源），重载后按依赖拓扑自动重建。code 为 call 源码；register 可选为安装源码。',
+  inputSchema: {
     type: 'object',
     properties: {
-      name: { type: 'string', description: '工具名（唯一）' },
+      name: { type: 'string', description: '工具名（唯一，与 author 组合）' },
+      author: { type: 'string', description: '可选作者，默认 core' },
       description: { type: 'string', description: '工具说明' },
-      parameters: { type: 'object', description: 'JSON Schema 参数声明' },
-      code: { type: 'string', description: 'run 源码：(args, ctx) => string' },
-      onRegister: { type: 'string', description: '可选：安装/重建源码 (ctx) => void' },
-      hidden: { type: 'boolean', description: '可选：是否隐藏（不进常规工具载荷）' },
+      inputSchema: { type: 'object', description: 'JSON Schema 参数声明' },
+      deps: { type: 'array', description: '可选前置依赖 [{name, author?, version?}]' },
+      riskLevel: { type: 'string', enum: ['low', 'medium', 'high', 'critical'], description: '可选风险级别' },
+      code: { type: 'string', description: 'call 源码：(args, ctx) => string' },
+      register: { type: 'string', description: '可选：安装/重建源码 (ctx) => void' },
     },
-    required: ['name', 'description', 'parameters', 'code'],
+    required: ['name', 'description', 'inputSchema', 'code'],
   },
-  run: (args, ctx) => {
+  call: (args, ctx) => {
     const name = String(args.name ?? '');
     if (!name) return '参数 name 缺失';
     const desc: ToolDesc = {
       name,
+      author: args.author ? String(args.author) : 'core',
       description: String(args.description ?? ''),
-      parameters: (args.parameters as Record<string, unknown>) ?? { type: 'object', properties: {} },
+      inputSchema: (args.inputSchema as Record<string, unknown>) ?? { type: 'object', properties: {} },
+      deps: (args.deps as DepRef[]) ?? undefined,
+      riskLevel: (args.riskLevel as ToolDesc['riskLevel']) ?? undefined,
       code: String(args.code ?? ''),
-      onRegister: args.onRegister ? String(args.onRegister) : undefined,
-      hidden: Boolean(args.hidden ?? false),
+      register: args.register ? String(args.register) : undefined,
+      enabled: true,
     };
     let tool: ToolDef;
     try {
@@ -332,22 +472,23 @@ const toolCreateTool: ToolDef = {
     } catch (e) {
       return `工具代码编译失败: ${e instanceof Error ? e.message : String(e)}`;
     }
-    ctx.storage.set('tools', name, desc); // 持久化
-    ctx.executor.register(tool); // 注册 → onRegister 安装
-    return `已创建工具 ${name}（已持久化 + 注册）`;
+    ctx.storage.set('tools', name, desc); // 持久化（真相源）
+    const ok = ctx.executor.register(tool); // 注册（含依赖校验）
+    return ok ? `已创建工具 ${name}（已持久化 + 注册）` : `工具 ${name} 注册被拒（依赖缺失或 author 冲突）`;
   },
 };
 
-// 6) 删除自编排工具（移除持久化 + 注销 → onUnregister 还原）
+// 6) 删除自编排工具（移除持久化 + 注销 → unregister 还原编排）
 const toolRemoveTool: ToolDef = {
   name: 'tool_remove',
-  description: '删除一个自编排工具：从 tools 命名空间移除并注销（触发其 onUnregister 还原编排）。',
-  parameters: {
+  author: 'core',
+  description: '删除一个自编排工具：从 tools 命名空间移除并注销（触发其 unregister 还原编排）。',
+  inputSchema: {
     type: 'object',
     properties: { name: { type: 'string', description: '要删除的工具名' } },
     required: ['name'],
   },
-  run: (args, ctx) => {
+  call: (args, ctx) => {
     const name = String(args.name ?? '');
     if (!name) return '参数 name 缺失';
     ctx.storage.del('tools', name);
@@ -356,43 +497,59 @@ const toolRemoveTool: ToolDef = {
   },
 };
 
-// 7) 系统编排发送原语（隐藏）：包装 agent.sendMessage
+// 7) 系统编排发送原语（无 call → 不进 LLM tool_call 清单，文档 §7；仍注册挂载，供 tool_list 揭示完整能力面）
 const orchestrateSendTool: ToolDef = {
   name: 'orchestrate_send',
-  hidden: true,
+  author: 'core',
   description:
     '系统编排发送原语：把文本作为用户消息送入工作循环并触发推理。正常对话无需调用；研究自我组织时它代表"驱动循环"这一系统原语。',
-  parameters: {
+  inputSchema: {
     type: 'object',
     properties: { text: { type: 'string', description: '要送入循环的用户文本' } },
     required: ['text'],
   },
-  run: (args, ctx) => {
-    ctx.agent.sendMessage(String(args.text ?? ''));
-    return '已送入编排循环';
+  register: (ctx) => {
+    // 安装：把 sendMessage 暴露为可经 this.orchestrateSend 调用的系统方法（便于其它工具驱动循环）
+    (ctx.this as unknown as Record<string, unknown>).orchestrateSend = (text: string) => ctx.agent.sendMessage(text);
   },
 };
 
-// 8) 枚举全量工具（含隐藏）供自组织研究
+// 8) 枚举全量工具（含无 call 的系统原语）供自组织研究
 const toolListTool: ToolDef = {
   name: 'tool_list',
-  description: '枚举当前所有已注册工具（含隐藏的系统原语），供研究自我组织时查看完整能力面。',
-  parameters: { type: 'object', properties: {} },
-  run: (_args, ctx) => {
+  author: 'core',
+  description: '枚举当前所有已注册工具（含无 call 的系统原语），供研究自我组织时查看完整能力面。',
+  inputSchema: { type: 'object', properties: {} },
+  call: (_args, ctx) => {
     const all = ctx.executor.list(true);
-    return JSON.stringify(all.map((t) => ({ name: t.name, description: t.description, hidden: !!t.hidden })));
+    return JSON.stringify(
+      all.map((t) => ({
+        name: t.name,
+        author: t.author ?? 'core',
+        description: t.description,
+        deps: t.deps ?? [],
+        riskLevel: t.riskLevel ?? 'low',
+        call: typeof t.call === 'function',
+        register: typeof t.register === 'function',
+      })),
+    );
   },
 };
 
 // 9) 会话管理：注册后自动把对话消息与工具调用落盘到 session 命名空间（session:<id>）
-//    onRegister = 安装/重建入口：生成 sessionId、初始化会话记录、写 default:sessions 索引、
+//    register = 安装/重建入口：生成 sessionId、初始化会话记录、写 default:sessions 索引、
 //    并向 agent.sendMessage 挂载 afterExe 钩子，每次对话轮结束后自动落盘。
+//    幂等：避免重复注册累积 afterExe 钩子；unregister 时移除该钩子（防泄漏）。
 //    切换会话 / 会话重建留待后续（用户明确"再说"）。
+//    模块级状态：钩子引用 + 当前 sessionId（重注册时更新，避免 stale-id 持续写盘）。
+let sessionPersistHook: (() => void) | null = null;
+let currentSessionId = '';
 const sessionTool: ToolDef = {
   name: 'session',
+  author: 'core',
   description:
     '会话管理：注册后自动把对话消息与工具调用落盘到 session 命名空间（session:<id>），并在 default:sessions 建索引。可查询当前会话信息。切换会话与重建留待后续。',
-  parameters: {
+  inputSchema: {
     type: 'object',
     properties: {
       action: {
@@ -402,25 +559,39 @@ const sessionTool: ToolDef = {
       },
     },
   },
-  onRegister: (ctx) => {
-    const id = genSessionId();
-    ctx.agent.sessionId = id;
+  register: (ctx) => {
+    currentSessionId = genSessionId();
+    ctx.agent.sessionId = currentSessionId;
     // 初始化会话记录并落盘（消息/工具调用均在 messages 数组内，一并持久化）
-    const sess = { id, createdAt: Date.now(), messages: [...ctx.agent.messages] };
-    ctx.storage.set('session', id, sess);
+    const sess = { id: currentSessionId, createdAt: Date.now(), messages: [...ctx.agent.messages] };
+    ctx.storage.set('session', currentSessionId, sess);
     // 写入会话索引 default:sessions
     const idx = ctx.storage.get<string[]>('default', 'sessions') ?? [];
-    if (!idx.includes(id)) {
-      idx.push(id);
+    if (!idx.includes(currentSessionId)) {
+      idx.push(currentSessionId);
       ctx.storage.set('default', 'sessions', idx);
     }
-    // 安装自动落盘：每次 sendMessage 完成后把消息/工具调用写盘
-    ctx.agent.sendMessage.afterExe.push(() => {
-      const cur = ctx.storage.get('session', id) ?? { id, createdAt: Date.now(), messages: [] };
-      ctx.storage.set('session', id, { ...cur, messages: [...ctx.agent.messages] });
-    });
+    // 安装自动落盘（幂等：仅首次挂钩子，重注册复用同一引用；id 走模块级，避免累积/泄漏）
+    if (!sessionPersistHook) {
+      sessionPersistHook = () => {
+        const id = currentSessionId;
+        if (!id) return;
+        const cur = ctx.storage.get('session', id) ?? { id, createdAt: Date.now(), messages: [] };
+        ctx.storage.set('session', id, { ...cur, messages: [...ctx.agent.messages] });
+      };
+      ctx.agent.sendMessage.afterExe.push(sessionPersistHook);
+    }
   },
-  run: (args, ctx) => {
+  unregister: (ctx) => {
+    if (sessionPersistHook) {
+      const arr = ctx.agent.sendMessage.afterExe;
+      const i = arr.indexOf(sessionPersistHook);
+      if (i >= 0) arr.splice(i, 1);
+      sessionPersistHook = null;
+      currentSessionId = '';
+    }
+  },
+  call: (args, ctx) => {
     const id = ctx.agent.sessionId;
     if (!id) return '会话未初始化';
     const action = String(args.action ?? 'info');
@@ -435,13 +606,12 @@ const sessionTool: ToolDef = {
 };
 
 // 默认工具清单（统一能力面）：领域工具 + 自开发工具 + 系统编排原语。
-// 全部由 agent.init() 注册；orchestrate_send 标 hidden 不进 LLM 日常载荷。
+// 全部由 agent.init() 注册；orchestrate_send 无 call（不进 LLM 日常载荷，但 tool_list 可见）。
 export const defaultTools: ToolDef[] = [
   storageGetTool,
   storageSetTool,
-  codeGenTool,
   codeRunTool,
-  toolCreateTool,
+  toolRegisterTool,
   toolRemoveTool,
   orchestrateSendTool,
   toolListTool,

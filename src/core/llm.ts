@@ -32,7 +32,7 @@ export interface ToolCallLite {
 export interface ToolLite {
   name: string;
   description: string;
-  parameters: Record<string, unknown>;
+  inputSchema: Record<string, unknown>;
 }
 
 // 请求参数（对齐 webagentcli ProviderAPIServices 的 request）
@@ -81,7 +81,7 @@ export const llm = {
     if (opts.tools?.length) {
       body.tools = opts.tools.map((t) => ({
         type: 'function',
-        function: { name: t.name, description: t.description, parameters: t.parameters },
+        function: { name: t.name, description: t.description, inputSchema: t.inputSchema },
       }));
       body.tool_choice = 'auto';
     }

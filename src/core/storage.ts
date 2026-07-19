@@ -1,5 +1,6 @@
 import { GM_getValue, GM_setValue, GM_deleteValue, GM_listValues } from '$';
 import { withHooks } from './withHooks';
+import type { ToolDesc } from './executor';
 import { bus } from './bus';
 
 // 逻辑存储层：薄封装 Tampermonkey GM_*，自动 JSON 序列化/反序列化。
@@ -49,6 +50,13 @@ export const storage = {
     const cur = GM_getValue<string>(realKey(ns, nsKey), undefined as unknown as string);
     if (cur === undefined) GM_setValue(realKey(ns, nsKey), raw); // 仅当新键缺失才搬
     GM_deleteValue(flatKey);
+  },
+
+  // 列出 tools 命名空间下全部工具描述符（系统真相源），供 boot 重建 / chat_ui 开关使用
+  listToolDefs(): ToolDesc[] {
+    return storage.keys('tools')
+      .map((k) => storage.get<ToolDesc>('tools', k))
+      .filter((d): d is ToolDesc => !!d);
   },
 };
 
