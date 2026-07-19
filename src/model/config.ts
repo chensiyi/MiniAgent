@@ -11,7 +11,7 @@ export interface AppConfig {
 
 export const DEFAULT_CONFIG: AppConfig = {
   theme: 'light',
-  apiKey: 'REDACTED',
+  apiKey: '', // 由用户运行时在配置/UI 中填写，勿硬编码进源码（Push Protection 会拦截）
   model: 'openrouter/free',
   baseURL: 'https://openrouter.ai/api/v1',
 };
