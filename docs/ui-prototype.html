@@ -1,234 +1,306 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>MiniAgent · UI 原型（Chat 面板）</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MiniAgent UI 原型 v2 — 玻璃态浮层</title>
 <style>
-  :root{
-    --navy-900:#0e1b30; --navy-800:#14253f; --navy-700:#1c3354; --navy-600:#26456f;
-    --accent:#3788DD; --accent-d:#2b6fbf; --accent-bg:#eaf2fc;
-    --ink:#1d2733; --ink-2:#54627a; --line:#e6ebf2; --bg:#eef1f6;
-    --ok:#1f7a4d; --ok-bg:#e9f6ee; --warn:#b4621a; --warn-bg:#fdf3e7;
-    --bad:#b3373a; --bad-bg:#fbeaea;
-    --bubble-user:var(--accent); --shadow:0 1px 3px rgba(20,37,63,.10),0 10px 30px rgba(20,37,63,.06);
-  }
-  *{box-sizing:border-box;}
-  body{margin:0;background:var(--bg);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
-    color:var(--ink);display:flex;justify-content:center;padding:24px 12px;line-height:1.6;}
-  /* 设备外框，模拟注入式侧栏 */
-  .device{width:392px;max-width:100%;height:760px;background:#fff;border-radius:18px;box-shadow:var(--shadow);
-    display:flex;flex-direction:column;overflow:hidden;border:1px solid var(--line);}
-  /* header */
-  .hd{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:linear-gradient(135deg,var(--navy-800),var(--navy-700));color:#fff;}
-  .hd .t{font-weight:700;font-size:15px;display:flex;align-items:center;gap:8px;}
-  .hd .dot{width:8px;height:8px;border-radius:50%;background:#4fd07a;box-shadow:0 0 0 3px rgba(79,208,122,.25);}
-  .hd .link{width:30px;height:30px;border-radius:8px;background:rgba(255,255,255,.12);display:flex;align-items:center;justify-content:center;
-    cursor:pointer;font-size:15px;border:none;color:#fff;}
-  .hd .link:hover{background:rgba(255,255,255,.22);}
-  .tip{position:fixed;background:var(--navy-900);color:#fff;padding:6px 10px;border-radius:8px;font-size:12px;opacity:0;transition:.2s;pointer-events:none;z-index:9;}
-  /* tool panel */
-  .tools{border-bottom:1px solid var(--line);background:#fafbfd;}
-  .tools .bar{display:flex;align-items:center;justify-content:space-between;padding:8px 14px;cursor:pointer;user-select:none;}
-  .tools .bar .lbl{font-size:12.5px;color:var(--ink-2);font-weight:600;}
-  .tools .bar .cnt{font-size:11.5px;color:var(--accent);background:var(--accent-bg);padding:1px 8px;border-radius:999px;}
-  .tools .bar .chev{transition:.2s;color:var(--ink-2);}
-  .tools.collapsed .body{display:none;}
-  .tools.collapsed .chev{transform:rotate(-90deg);}
-  .tools .body{padding:4px 12px 10px;}
-  .trow{display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:8px;}
-  .trow:hover{background:#f1f4f9;}
-  .trow .ic{width:26px;height:26px;border-radius:7px;background:var(--accent-bg);color:var(--accent-d);display:flex;align-items:center;justify-content:center;font-size:13px;flex:0 0 auto;}
-  .trow .meta{flex:1;min-width:0;}
-  .trow .nm{font-size:13px;font-weight:600;}
-  .trow .ds{font-size:11px;color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-  .badge{font-size:10px;padding:1px 6px;border-radius:999px;font-weight:700;flex:0 0 auto;}
-  .b-low{background:var(--ok-bg);color:var(--ok);} .b-med{background:var(--accent-bg);color:var(--accent-d);}
-  .b-high{background:var(--warn-bg);color:var(--warn);} .b-crit{background:var(--bad-bg);color:var(--bad);}
-  /* switch */
-  .sw{position:relative;width:38px;height:22px;flex:0 0 auto;cursor:pointer;}
-  .sw input{display:none;}
-  .sw .tk{position:absolute;inset:0;background:#cfd6e2;border-radius:999px;transition:.2s;}
-  .sw .kn{position:absolute;top:2px;left:2px;width:18px;height:18px;background:#fff;border-radius:50%;transition:.2s;box-shadow:0 1px 2px rgba(0,0,0,.2);}
-  .sw input:checked + .tk{background:var(--accent);}
-  .sw input:checked + .tk + .kn{transform:translateX(16px);}
-  /* messages */
-  .msgs{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px;background:#fff;}
-  .row{display:flex;}
-  .row.user{justify-content:flex-end;}
-  .row.sys{justify-content:center;}
-  .bub{max-width:82%;padding:9px 12px;border-radius:14px;font-size:13.5px;word-break:break-word;}
-  .row.user .bub{background:var(--bubble-user);color:#fff;border-bottom-right-radius:4px;}
-  .row.assistant .bub{background:#f1f4f9;color:var(--ink);border-bottom-left-radius:4px;}
-  .row.sys .bub{background:#eef1f6;color:var(--ink-2);font-size:12px;border-radius:999px;padding:4px 12px;}
-  .caret{display:inline-block;width:7px;height:13px;background:var(--ink-2);margin-left:2px;vertical-align:-2px;animation:blink 1s steps(2) infinite;border-radius:1px;}
-  @keyframes blink{50%{opacity:0;}}
-  /* tool card */
-  .tool{max-width:86%;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:#fff;font-size:13px;}
-  .tool .th{display:flex;align-items:center;gap:8px;padding:8px 10px;background:#f7f9fc;border-bottom:1px solid var(--line);}
-  .tool .th .nm{font-weight:600;font-size:12.5px;}
-  .tool .th .st{margin-left:auto;font-size:11px;font-weight:700;padding:1px 8px;border-radius:999px;}
-  .st.pending{background:var(--warn-bg);color:var(--warn);}
-  .st.running{background:var(--accent-bg);color:var(--accent-d);}
-  .st.result{background:var(--ok-bg);color:var(--ok);}
-  .st.error{background:var(--bad-bg);color:var(--bad);}
-  .st.refused{background:#eef1f6;color:var(--ink-2);}
-  .tool .bd{padding:9px 11px;color:var(--ink);}
-  .tool .code{font-family:"SFMono-Regular",Consolas,monospace;font-size:12px;background:#f4f6fa;padding:5px 8px;border-radius:6px;color:#243b5e;margin-top:4px;}
-  .tool .acts{display:flex;gap:8px;padding:0 11px 11px;}
-  .btn{border:none;border-radius:8px;padding:6px 14px;font-size:12.5px;font-weight:600;cursor:pointer;}
-  .btn.ok{background:var(--accent);color:#fff;} .btn.ok:hover{background:var(--accent-d);}
-  .btn.no{background:#eef1f6;color:var(--ink-2);} .btn.no:hover{background:#e2e7ef;}
-  .spin{display:inline-block;width:12px;height:12px;border:2px solid var(--accent);border-top-color:transparent;border-radius:50%;animation:sp 0.7s linear infinite;vertical-align:-1px;margin-right:5px;}
-  @keyframes sp{to{transform:rotate(360deg);}}
-  .muted{color:var(--ink-2);font-style:italic;}
-  /* input */
-  .inp{display:flex;gap:8px;padding:10px 12px;border-top:1px solid var(--line);background:#fff;}
-  .inp input{flex:1;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:13.5px;outline:none;font-family:inherit;}
-  .inp input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(55,136,221,.12);}
-  .send{min-width:56px;border:none;border-radius:10px;background:var(--accent);color:#fff;font-weight:600;cursor:pointer;font-size:13.5px;padding:0 16px;}
-  .send:hover{background:var(--accent-d);}
-  .send.stop{background:var(--bad);}
-  .legend{font-size:11px;color:var(--ink-2);text-align:center;padding:0 0 6px;}
+:root{
+  --brand:#378DD;
+  --brand-soft:rgba(55,141,221,0.22);
+  --glass-bg:rgba(18,26,44,0.52);
+  --glass-bg-strong:rgba(22,31,52,0.66);
+  --glass-border:rgba(255,255,255,0.16);
+  --glass-border-strong:rgba(255,255,255,0.26);
+  --glass-blur:16px;
+  --text:#eef2ff;
+  --text-dim:rgba(238,242,255,0.62);
+  --radius:16px;
+  --risk-low:#34d399;
+  --risk-medium:#fbbf24;
+  --risk-high:#fb923c;
+  --risk-critical:#f87171;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+html,body{height:100%;}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,'PingFang SC','Microsoft YaHei',sans-serif;
+  color:var(--text);
+  -webkit-font-smoothing:antialiased;
+}
+
+/* ===== 模拟宿主页面背景：仅用于演示玻璃效果，不属于 UI 本体 ===== */
+.host{
+  position:fixed; inset:0; overflow:auto;
+  background:
+    radial-gradient(1100px 560px at 18% 8%, #1d2c4e 0%, transparent 58%),
+    radial-gradient(900px 480px at 82% 86%, #2e1d52 0%, transparent 55%),
+    linear-gradient(135deg,#0b1220 0%,#0a0f1c 100%);
+  padding:40px 32px;
+}
+.host .mock-h{font-size:30px;font-weight:700;color:rgba(255,255,255,0.9);max-width:760px;}
+.host .mock-p{margin-top:14px;max-width:760px;line-height:1.9;color:rgba(255,255,255,0.42);font-size:15px;}
+.host .mock-card{
+  margin-top:26px;max-width:760px;padding:20px 22px;border-radius:14px;
+  background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.07);
+  color:rgba(255,255,255,0.5);line-height:1.8;font-size:14px;
+}
+.host .hint{
+  position:fixed;left:24px;bottom:24px;font-size:12px;color:rgba(255,255,255,0.35);
+  background:rgba(0,0,0,0.3);padding:8px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.08);
+}
+.host .demo-err{
+  position:fixed;left:24px;top:24px;font-size:12px;color:rgba(255,255,255,0.55);
+  background:rgba(0,0,0,0.35);padding:8px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.1);
+  cursor:pointer;
+}
+.host .demo-err:hover{border-color:var(--brand);color:#fff;}
+
+/* ===== MiniAgent 浮层 UI（无背景板 / 无标题栏） ===== */
+.fab{
+  position:fixed; right:26px; bottom:26px; width:392px;
+  display:flex; flex-direction:column; gap:10px;
+  /* 注意：容器本身透明，无背景板 */
+  z-index:50;
+}
+.messages{
+  display:flex; flex-direction:column; gap:10px;
+  max-height:58vh; overflow-y:auto; padding:4px 2px;
+  scrollbar-width:thin; scrollbar-color:rgba(255,255,255,0.2) transparent;
+}
+.messages::-webkit-scrollbar{width:6px;}
+.messages::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.2);border-radius:3px;}
+
+/* —— 玻璃气泡 —— */
+.bubble{
+  max-width:84%; padding:10px 13px; border-radius:14px; font-size:14px; line-height:1.6;
+  backdrop-filter:blur(var(--glass-blur)); -webkit-backdrop-filter:blur(var(--glass-blur));
+  border:1px solid var(--glass-border);
+  background:var(--glass-bg);
+  box-shadow:0 6px 22px rgba(0,0,0,0.28);
+  animation:pop .22s ease;
+}
+@keyframes pop{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:none;}}
+.bubble.user{align-self:flex-end; background:var(--brand-soft); border-color:rgba(55,141,221,0.45);}
+.bubble.assistant{align-self:flex-start;}
+.bubble.system{align-self:center; max-width:92%; text-align:center; font-size:13px; color:var(--text-dim);
+  background:rgba(255,255,255,0.06); border-color:rgba(255,255,255,0.10);}
+.bubble.error{align-self:center; max-width:92%; background:rgba(248,113,113,0.14);
+  border-color:rgba(248,113,113,0.4);}
+.bubble .who{font-size:11px;color:var(--text-dim);margin-bottom:3px;display:block;}
+.caret{display:inline-block;width:7px;height:14px;background:var(--brand);border-radius:1px;
+  vertical-align:-2px;margin-left:2px;animation:blink 1s steps(2) infinite;}
+@keyframes blink{50%{opacity:0;}}
+
+/* —— 工具卡片（气泡内 / 确认态） —— */
+.toolcard{border-top:1px solid rgba(255,255,255,0.10);margin-top:8px;padding-top:8px;}
+.toolcard .row{display:flex;align-items:center;gap:8px;font-size:12px;}
+.badge{font-size:10px;font-weight:700;padding:1px 7px;border-radius:999px;letter-spacing:.3px;}
+.badge.low{background:rgba(52,211,153,0.18);color:var(--risk-low);}
+.badge.medium{background:rgba(251,191,36,0.18);color:var(--risk-medium);}
+.badge.high{background:rgba(251,146,60,0.18);color:var(--risk-high);}
+.badge.critical{background:rgba(248,113,113,0.18);color:var(--risk-critical);}
+.toolcard .acts{display:flex;gap:6px;margin-top:8px;}
+.mini{
+  font-size:12px;padding:4px 12px;border-radius:8px;cursor:pointer;border:1px solid var(--glass-border);
+  background:rgba(255,255,255,0.08);color:var(--text);transition:.15s;
+}
+.mini:hover{background:rgba(255,255,255,0.16);}
+.mini.ok{border-color:rgba(52,211,153,0.5);color:var(--risk-low);}
+.mini.no{border-color:rgba(248,113,113,0.5);color:var(--risk-critical);}
+.spinner{width:13px;height:13px;border:2px solid rgba(255,255,255,0.25);border-top-color:#fff;
+  border-radius:50%;display:inline-block;animation:spin .7s linear infinite;vertical-align:-2px;}
+@keyframes spin{to{transform:rotate(360deg);}}
+.refused{color:var(--risk-critical);font-size:12px;margin-top:6px;}
+.refused a{color:var(--brand);}
+
+/* —— 配置异常链接（仅报错气泡内出现） —— */
+.err-link{display:inline-block;margin-top:6px;color:var(--brand);text-decoration:underline;
+  font-size:12.5px;cursor:pointer;}
+.err-link:hover{color:#6fb0f0;}
+
+/* —— 工具面板（点击输入框左侧按钮展开） —— */
+.toolpanel{
+  position:absolute; right:0; bottom:calc(100% + 8px);
+  width:100%; padding:12px; border-radius:14px;
+  background:var(--glass-bg-strong); border:1px solid var(--glass-border-strong);
+  backdrop-filter:blur(var(--glass-blur)); -webkit-backdrop-filter:blur(var(--glass-blur));
+  box-shadow:0 12px 36px rgba(0,0,0,0.4);
+  display:none; flex-direction:column; gap:8px;
+  transform-origin:bottom right; animation:rise .18s ease;
+}
+.toolpanel.open{display:flex;}
+@keyframes rise{from{opacity:0;transform:translateY(8px) scale(.98);}to{opacity:1;transform:none;}}
+.toolpanel .ph{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--text-dim);}
+.panel-tool{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:10px;
+  background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);}
+.panel-tool .nm{flex:1;font-size:13px;}
+.panel-tool .ds{font-size:11px;color:var(--text-dim);}
+/* 开关 */
+.switch{position:relative;width:38px;height:21px;flex:none;cursor:pointer;}
+.switch input{opacity:0;width:0;height:0;}
+.slider{position:absolute;inset:0;background:rgba(255,255,255,0.18);border-radius:999px;transition:.2s;}
+.slider::before{content:"";position:absolute;width:15px;height:15px;left:3px;top:3px;background:#fff;
+  border-radius:50%;transition:.2s;}
+.switch input:checked + .slider{background:var(--brand);}
+.switch input:checked + .slider::before{transform:translateX(17px);}
+
+/* —— 输入行：工具按钮(左) · 输入框 · 发送/停止 —— */
+.composer{position:relative; display:flex; align-items:flex-end; gap:8px;}
+.toolbtn{
+  flex:none; width:42px; height:42px; border-radius:13px; cursor:pointer;
+  display:flex;align-items:center;justify-content:center;font-size:19px;
+  background:var(--glass-bg); border:1px solid var(--glass-border);
+  backdrop-filter:blur(var(--glass-blur)); -webkit-backdrop-filter:blur(var(--glass-blur));
+  color:var(--text); transition:.15s;
+}
+.toolbtn:hover{border-color:var(--glass-border-strong);background:var(--glass-bg-strong);}
+.toolbtn.active{border-color:var(--brand);color:var(--brand);}
+.toolbtn .cnt{position:absolute;top:-5px;right:-5px;min-width:17px;height:17px;padding:0 4px;
+  font-size:10px;font-weight:700;line-height:17px;text-align:center;border-radius:999px;
+  background:var(--brand);color:#fff;}
+.input{
+  flex:1; min-height:42px; max-height:120px; padding:11px 13px; resize:none; font-size:14px;
+  color:var(--text); line-height:1.5; border-radius:13px;
+  background:var(--glass-bg); border:1px solid var(--glass-border);
+  backdrop-filter:blur(var(--glass-blur)); -webkit-backdrop-filter:blur(var(--glass-blur));
+  box-shadow:0 6px 22px rgba(0,0,0,0.28);
+}
+.input::placeholder{color:var(--text-dim);}
+.input:focus{outline:none;border-color:var(--glass-border-strong);}
+.send{
+  flex:none; height:42px; padding:0 16px; border-radius:13px; cursor:pointer; font-size:14px; font-weight:600;
+  color:#fff; border:1px solid rgba(55,141,221,0.5);
+  background:linear-gradient(180deg,rgba(55,141,221,0.9),rgba(55,141,221,0.7));
+  backdrop-filter:blur(var(--glass-blur)); -webkit-backdrop-filter:blur(var(--glass-blur));
+  transition:.15s;
+}
+.send:hover{filter:brightness(1.08);}
+.send.stop{background:linear-gradient(180deg,rgba(248,113,113,0.9),rgba(248,113,113,0.7));border-color:rgba(248,113,113,0.5);}
 </style>
 </head>
 <body>
-<div class="device">
-  <div class="hd">
-    <div class="t"><span class="dot"></span> MiniAgent</div>
-    <button class="link" id="setBtn" title="跳转工具存储编辑界面">🔗</button>
-  </div>
 
-  <div class="tools" id="tools">
-    <div class="bar" id="toolsBar">
-      <span class="lbl">工具</span>
-      <span style="display:flex;align-items:center;gap:8px;">
-        <span class="cnt" id="toolCnt">启用 3 / 4</span>
-        <span class="chev">▾</span>
-      </span>
-    </div>
-    <div class="body" id="toolsBody">
-      <div class="trow">
-        <div class="ic">🔍</div><div class="meta"><div class="nm">网页搜索</div><div class="ds">联网检索</div></div>
-        <span class="badge b-low">low</span>
-        <label class="sw"><input type="checkbox" checked onchange="recount()"><span class="tk"></span><span class="kn"></span></label>
-      </div>
-      <div class="trow">
-        <div class="ic">📄</div><div class="meta"><div class="nm">DOM 提取</div><div class="ds">读取页面元素</div></div>
-        <span class="badge b-med">medium</span>
-        <label class="sw"><input type="checkbox" checked onchange="recount()"><span class="tk"></span><span class="kn"></span></label>
-      </div>
-      <div class="trow">
-        <div class="ic">⚡</div><div class="meta"><div class="nm">执行 JS</div><div class="ds">页面内运行脚本</div></div>
-        <span class="badge b-high">high</span>
-        <label class="sw"><input type="checkbox" onchange="recount()"><span class="tk"></span><span class="kn"></span></label>
-      </div>
-      <div class="trow">
-        <div class="ic">💾</div><div class="meta"><div class="nm">Memory 写入</div><div class="ds">写入长期记忆</div></div>
-        <span class="badge b-crit">critical</span>
-        <label class="sw"><input type="checkbox" checked onchange="recount()"><span class="tk"></span><span class="kn"></span></label>
-      </div>
-    </div>
-  </div>
+<!-- 模拟宿主页面（仅演示玻璃效果） -->
+<div class="host">
+  <div class="mock-h">在任意网页上，MiniAgent 以玻璃浮层存在</div>
+  <div class="mock-p">UI 不再有背景板与标题栏，直接浮于页面内容之上。输入框与气泡均为毛玻璃透明效果，工具入口收纳在输入框左侧的按钮中，点击展开。外部工具存储编辑链接仅在配置异常时报错气泡内出现。</div>
+  <div class="mock-card">Lorem ipsum dolor sit amet, consectetur adipiscing elit. 本区块用于衬托毛玻璃的透视感——气泡与输入框应能看到下方文字的模糊投影。Phasellus euismod, nisl vel tincidunt lacinia, sapien eros aliquam arcu, nec volutpat metus magna in nibh.</div>
+  <div class="demo-err" onclick="injectConfigError()">▶ 演示：触发配置异常气泡</div>
+  <div class="hint">左下为演示控件 · 右下方为 MiniAgent 浮层本体</div>
+</div>
 
-  <div class="msgs" id="msgs">
-    <div class="row sys"><div class="bub">已加载 4 个工具 · 工具存储已连接</div></div>
+<!-- MiniAgent 浮层（无背景板 / 无标题栏） -->
+<div class="fab" id="fab">
+  <div class="messages" id="messages">
+    <div class="bubble system">已加载 4 个工具 · 点击下方 🔧 管理启用</div>
+    <div class="bubble user"><span class="who">你</span>帮我查一下这家公司的最新融资</div>
+    <div class="bubble assistant"><span class="who">助手</span>正在调用工具核实信息<span class="caret"></span></div>
 
-    <div class="row user"><div class="bub">查下本页标题，顺手写进记忆</div></div>
-
-    <div class="row assistant"><div class="bub">好的，先用 DOM 提取拿到标题。</div></div>
-
-    <div class="row assistant">
-      <div class="tool">
-        <div class="th"><span>📄</span><span class="nm">DOM 提取</span><span class="st result">result</span></div>
-        <div class="bd">读取 <code>document.title</code><div class="code">"MiniAgent 项目主页"</div></div>
-      </div>
-    </div>
-
-    <div class="row assistant"><div class="bub">现在写入记忆（需确认）。</div></div>
-
-    <!-- HERO：高风险确认气泡（可交互） -->
-    <div class="row assistant" id="heroRow">
-      <div class="tool">
-        <div class="th"><span>💾</span><span class="nm">Memory 写入</span><span class="st pending">pending</span></div>
-        <div class="bd">写入长期记忆<div class="code">key=last_title<br>value="MiniAgent 项目主页"</div></div>
+    <!-- 工具确认气泡（executor 叠加） -->
+    <div class="bubble assistant" id="tc1">
+      <span class="who">工具 · 网页搜索</span>
+      <div>查询：公司 最新融资 2026</div>
+      <div class="toolcard">
+        <div class="row"><span class="badge medium">medium</span><span>风险：中 · 仅读取公开网页</span></div>
         <div class="acts">
-          <button class="btn ok" onclick="approve()">批准</button>
-          <button class="btn no" onclick="deny()">拒绝</button>
+          <button class="mini ok" onclick="approve('tc1')">允许执行</button>
+          <button class="mini no" onclick="deny('tc1')">拒绝</button>
         </div>
       </div>
     </div>
+
+    <div class="bubble assistant"><span class="who">助手</span>已找到 3 条相关记录，正在汇总…</div>
   </div>
 
-  <div class="legend">原型演示 · 点击 💾 气泡的「批准/拒绝」看状态流转</div>
+  <!-- 输入行 -->
+  <div class="composer">
+    <!-- 工具面板（点击工具按钮展开） -->
+    <div class="toolpanel" id="toolpanel">
+      <div class="ph"><span>工具注册表</span><span id="cntLabel">启用 4 / 4</span></div>
+      <div class="panel-tool">
+        <div class="nm">网页搜索<div class="ds">public read</div></div>
+        <span class="badge low">low</span>
+        <label class="switch"><input type="checkbox" checked onchange="recount()"><span class="slider"></span></label>
+      </div>
+      <div class="panel-tool">
+        <div class="nm">DOM 提取<div class="ds">page read</div></div>
+        <span class="badge medium">medium</span>
+        <label class="switch"><input type="checkbox" checked onchange="recount()"><span class="slider"></span></label>
+      </div>
+      <div class="panel-tool">
+        <div class="nm">执行 JS<div class="ds">page write</div></div>
+        <span class="badge high">high</span>
+        <label class="switch"><input type="checkbox" checked onchange="recount()"><span class="slider"></span></label>
+      </div>
+      <div class="panel-tool">
+        <div class="nm">Memory 写入<div class="ds">state write</div></div>
+        <span class="badge critical">critical</span>
+        <label class="switch"><input type="checkbox" checked onchange="recount()"><span class="slider"></span></label>
+      </div>
+    </div>
 
-  <div class="inp">
-    <input id="msgInput" placeholder="输入消息…" />
-    <button class="send" id="sendBtn" onclick="sendOrStop()">发送</button>
+    <!-- 工具入口按钮（输入框左侧） -->
+    <button class="toolbtn" id="toolbtn" onclick="toggleTools()" title="工具">
+      🔧<span class="cnt" id="cnt">4</span>
+    </button>
+
+    <textarea class="input" id="input" rows="1" placeholder="给 MiniAgent 发消息…" oninput="autoGrow(this)" onkeydown="onKey(event)"></textarea>
+    <button class="send" id="send" onclick="sendOrStop()">发送</button>
   </div>
 </div>
 
-<div class="tip" id="tip">跳转工具存储编辑界面（基座配置在此完成）</div>
-
 <script>
-  // 工具面板折叠
-  document.getElementById('toolsBar').onclick=()=>document.getElementById('tools').classList.toggle('collapsed');
-  function recount(){
-    const on=document.querySelectorAll('#toolsBody input:checked').length;
-    document.getElementById('toolCnt').textContent='启用 '+on+' / 4';
+function toggleTools(){
+  const p=document.getElementById('toolpanel'), b=document.getElementById('toolbtn');
+  const open=p.classList.toggle('open');
+  b.classList.toggle('active',open);
+}
+function recount(){
+  const n=document.querySelectorAll('#toolpanel input:checked').length;
+  document.getElementById('cnt').textContent=n;
+  document.getElementById('cntLabel').textContent='启用 '+n+' / 4';
+}
+function approve(id){
+  const card=document.getElementById(id);
+  card.querySelector('.acts').innerHTML='<span class="spinner"></span> 执行中…';
+  setTimeout(()=>{
+    card.querySelector('.toolcard').innerHTML=
+      '<div class="row"><span class="badge low">done</span><span>返回 3 条结果 · 已回灌 chat</span></div>';
+  },1100);
+}
+function deny(id){
+  const card=document.getElementById(id);
+  card.querySelector('.acts').remove();
+  card.querySelector('.toolcard').innerHTML=
+    '<div class="refused">已拒绝 · 结果未执行，已回灌 chat 说明</div>';
+}
+function autoGrow(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,120)+'px';}
+function onKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendOrStop();}}
+let streaming=false;
+function sendOrStop(){
+  const btn=document.getElementById('send'), box=document.getElementById('input'), msgs=document.getElementById('messages');
+  if(streaming){
+    streaming=false; btn.textContent='发送'; btn.classList.remove('stop');
+    return;
   }
-  // 设置链接提示
-  const tip=document.getElementById('tip');
-  document.getElementById('setBtn').onclick=(e)=>{
-    const r=e.target.getBoundingClientRect();
-    tip.style.left=(r.left-40)+'px'; tip.style.top=(r.bottom+8)+'px'; tip.style.opacity=1;
-    setTimeout(()=>tip.style.opacity=0,1600);
-  };
-  // HERO 交互：批准 / 拒绝
-  function approve(){
-    const row=document.getElementById('heroRow');
-    row.querySelector('.tool').outerHTML=`
-      <div class="tool">
-        <div class="th"><span>💾</span><span class="nm">Memory 写入</span><span class="st running">running</span></div>
-        <div class="bd"><span class="spin"></span>正在写入长期记忆…</div>
-      </div>`;
-    row.classList.remove('assistant'); // 防重复绑定
-    setTimeout(()=>{
-      row.innerHTML=`<div class="tool">
-        <div class="th"><span>💾</span><span class="nm">Memory 写入</span><span class="st result">result</span></div>
-        <div class="bd">已写入<div class="code">last_title = "MiniAgent 项目主页"</div></div>
-      </div>`;
-    },900);
-  }
-  function deny(){
-    const row=document.getElementById('heroRow');
-    row.innerHTML=`<div class="tool">
-      <div class="th"><span>💾</span><span class="nm">Memory 写入</span><span class="st refused">refused</span></div>
-      <div class="bd muted">用户已拒绝 · 结果已回灌 chat，LLM 将改策略</div>
-    </div>`;
-  }
-  // 发送 / 停止 双态
-  let running=false;
-  function sendOrStop(){
-    const btn=document.getElementById('sendBtn');
-    const input=document.getElementById('msgInput');
-    const msgs=document.getElementById('msgs');
-    if(!running){
-      const txt=input.value.trim(); if(!txt) return;
-      msgs.insertAdjacentHTML('beforeend',`<div class="row user"><div class="bub">${txt}</div></div>
-        <div class="row assistant"><div class="bub">思考中<span class="caret"></span></div></div>`);
-      input.value=''; running=true; btn.textContent='停止'; btn.classList.add('stop');
-      msgs.scrollTop=msgs.scrollHeight;
-      setTimeout(()=>{ // 模拟完成
-        const a=msgs.querySelector('.row.assistant:last-child .bub'); if(a) a.textContent='已处理（原型模拟）。';
-        running=false; btn.textContent='发送'; btn.classList.remove('stop');
-      },1100);
-    }else{
-      msgs.insertAdjacentHTML('beforeend',`<div class="row sys"><div class="bub">已停止</div></div>`);
-      running=false; btn.textContent='发送'; btn.classList.remove('stop');
-      msgs.scrollTop=msgs.scrollHeight;
-    }
-  }
+  const text=box.value.trim(); if(!text) return;
+  const u=document.createElement('div'); u.className='bubble user';
+  u.innerHTML='<span class="who">你</span>'+text.replace(/</g,'&lt;');
+  msgs.appendChild(u); box.value=''; box.style.height='auto';
+  const a=document.createElement('div'); a.className='bubble assistant';
+  a.innerHTML='<span class="who">助手</span>思考中<span class="caret"></span>';
+  msgs.appendChild(a); msgs.scrollTop=msgs.scrollHeight;
+  streaming=true; btn.textContent='停止'; btn.classList.add('stop');
+  setTimeout(()=>{a.innerHTML='<span class="who">助手</span>已收到，正在处理你的请求。';streaming=false;btn.textContent='发送';btn.classList.remove('stop');},1600);
+}
+function injectConfigError(){
+  const msgs=document.getElementById('messages');
+  const e=document.createElement('div'); e.className='bubble error';
+  e.innerHTML='<span class="who">配置异常</span>工具存储加载失败：provider 未配置或令牌失效。'+
+    '<a class="err-link" onclick="alert(\'跳转外部工具存储编辑界面（演示）\')">前往工具存储编辑 →</a>';
+  msgs.appendChild(e); msgs.scrollTop=msgs.scrollHeight;
+}
 </script>
 </body>
 </html>
