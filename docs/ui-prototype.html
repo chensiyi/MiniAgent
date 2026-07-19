@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>MiniAgent · UI 原型（Chat 面板）</title>
+<style>
+  :root{
+    --navy-900:#0e1b30; --navy-800:#14253f; --navy-700:#1c3354; --navy-600:#26456f;
+    --accent:#3788DD; --accent-d:#2b6fbf; --accent-bg:#eaf2fc;
+    --ink:#1d2733; --ink-2:#54627a; --line:#e6ebf2; --bg:#eef1f6;
+    --ok:#1f7a4d; --ok-bg:#e9f6ee; --warn:#b4621a; --warn-bg:#fdf3e7;
+    --bad:#b3373a; --bad-bg:#fbeaea;
+    --bubble-user:var(--accent); --shadow:0 1px 3px rgba(20,37,63,.10),0 10px 30px rgba(20,37,63,.06);
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    color:var(--ink);display:flex;justify-content:center;padding:24px 12px;line-height:1.6;}
+  /* 设备外框，模拟注入式侧栏 */
+  .device{width:392px;max-width:100%;height:760px;background:#fff;border-radius:18px;box-shadow:var(--shadow);
+    display:flex;flex-direction:column;overflow:hidden;border:1px solid var(--line);}
+  /* header */
+  .hd{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:linear-gradient(135deg,var(--navy-800),var(--navy-700));color:#fff;}
+  .hd .t{font-weight:700;font-size:15px;display:flex;align-items:center;gap:8px;}
+  .hd .dot{width:8px;height:8px;border-radius:50%;background:#4fd07a;box-shadow:0 0 0 3px rgba(79,208,122,.25);}
+  .hd .link{width:30px;height:30px;border-radius:8px;background:rgba(255,255,255,.12);display:flex;align-items:center;justify-content:center;
+    cursor:pointer;font-size:15px;border:none;color:#fff;}
+  .hd .link:hover{background:rgba(255,255,255,.22);}
+  .tip{position:fixed;background:var(--navy-900);color:#fff;padding:6px 10px;border-radius:8px;font-size:12px;opacity:0;transition:.2s;pointer-events:none;z-index:9;}
+  /* tool panel */
+  .tools{border-bottom:1px solid var(--line);background:#fafbfd;}
+  .tools .bar{display:flex;align-items:center;justify-content:space-between;padding:8px 14px;cursor:pointer;user-select:none;}
+  .tools .bar .lbl{font-size:12.5px;color:var(--ink-2);font-weight:600;}
+  .tools .bar .cnt{font-size:11.5px;color:var(--accent);background:var(--accent-bg);padding:1px 8px;border-radius:999px;}
+  .tools .bar .chev{transition:.2s;color:var(--ink-2);}
+  .tools.collapsed .body{display:none;}
+  .tools.collapsed .chev{transform:rotate(-90deg);}
+  .tools .body{padding:4px 12px 10px;}
+  .trow{display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:8px;}
+  .trow:hover{background:#f1f4f9;}
+  .trow .ic{width:26px;height:26px;border-radius:7px;background:var(--accent-bg);color:var(--accent-d);display:flex;align-items:center;justify-content:center;font-size:13px;flex:0 0 auto;}
+  .trow .meta{flex:1;min-width:0;}
+  .trow .nm{font-size:13px;font-weight:600;}
+  .trow .ds{font-size:11px;color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .badge{font-size:10px;padding:1px 6px;border-radius:999px;font-weight:700;flex:0 0 auto;}
+  .b-low{background:var(--ok-bg);color:var(--ok);} .b-med{background:var(--accent-bg);color:var(--accent-d);}
+  .b-high{background:var(--warn-bg);color:var(--warn);} .b-crit{background:var(--bad-bg);color:var(--bad);}
+  /* switch */
+  .sw{position:relative;width:38px;height:22px;flex:0 0 auto;cursor:pointer;}
+  .sw input{display:none;}
+  .sw .tk{position:absolute;inset:0;background:#cfd6e2;border-radius:999px;transition:.2s;}
+  .sw .kn{position:absolute;top:2px;left:2px;width:18px;height:18px;background:#fff;border-radius:50%;transition:.2s;box-shadow:0 1px 2px rgba(0,0,0,.2);}
+  .sw input:checked + .tk{background:var(--accent);}
+  .sw input:checked + .tk + .kn{transform:translateX(16px);}
+  /* messages */
+  .msgs{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px;background:#fff;}
+  .row{display:flex;}
+  .row.user{justify-content:flex-end;}
+  .row.sys{justify-content:center;}
+  .bub{max-width:82%;padding:9px 12px;border-radius:14px;font-size:13.5px;word-break:break-word;}
+  .row.user .bub{background:var(--bubble-user);color:#fff;border-bottom-right-radius:4px;}
+  .row.assistant .bub{background:#f1f4f9;color:var(--ink);border-bottom-left-radius:4px;}
+  .row.sys .bub{background:#eef1f6;color:var(--ink-2);font-size:12px;border-radius:999px;padding:4px 12px;}
+  .caret{display:inline-block;width:7px;height:13px;background:var(--ink-2);margin-left:2px;vertical-align:-2px;animation:blink 1s steps(2) infinite;border-radius:1px;}
+  @keyframes blink{50%{opacity:0;}}
+  /* tool card */
+  .tool{max-width:86%;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:#fff;font-size:13px;}
+  .tool .th{display:flex;align-items:center;gap:8px;padding:8px 10px;background:#f7f9fc;border-bottom:1px solid var(--line);}
+  .tool .th .nm{font-weight:600;font-size:12.5px;}
+  .tool .th .st{margin-left:auto;font-size:11px;font-weight:700;padding:1px 8px;border-radius:999px;}
+  .st.pending{background:var(--warn-bg);color:var(--warn);}
+  .st.running{background:var(--accent-bg);color:var(--accent-d);}
+  .st.result{background:var(--ok-bg);color:var(--ok);}
+  .st.error{background:var(--bad-bg);color:var(--bad);}
+  .st.refused{background:#eef1f6;color:var(--ink-2);}
+  .tool .bd{padding:9px 11px;color:var(--ink);}
+  .tool .code{font-family:"SFMono-Regular",Consolas,monospace;font-size:12px;background:#f4f6fa;padding:5px 8px;border-radius:6px;color:#243b5e;margin-top:4px;}
+  .tool .acts{display:flex;gap:8px;padding:0 11px 11px;}
+  .btn{border:none;border-radius:8px;padding:6px 14px;font-size:12.5px;font-weight:600;cursor:pointer;}
+  .btn.ok{background:var(--accent);color:#fff;} .btn.ok:hover{background:var(--accent-d);}
+  .btn.no{background:#eef1f6;color:var(--ink-2);} .btn.no:hover{background:#e2e7ef;}
+  .spin{display:inline-block;width:12px;height:12px;border:2px solid var(--accent);border-top-color:transparent;border-radius:50%;animation:sp 0.7s linear infinite;vertical-align:-1px;margin-right:5px;}
+  @keyframes sp{to{transform:rotate(360deg);}}
+  .muted{color:var(--ink-2);font-style:italic;}
+  /* input */
+  .inp{display:flex;gap:8px;padding:10px 12px;border-top:1px solid var(--line);background:#fff;}
+  .inp input{flex:1;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:13.5px;outline:none;font-family:inherit;}
+  .inp input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(55,136,221,.12);}
+  .send{min-width:56px;border:none;border-radius:10px;background:var(--accent);color:#fff;font-weight:600;cursor:pointer;font-size:13.5px;padding:0 16px;}
+  .send:hover{background:var(--accent-d);}
+  .send.stop{background:var(--bad);}
+  .legend{font-size:11px;color:var(--ink-2);text-align:center;padding:0 0 6px;}
+</style>
+</head>
+<body>
+<div class="device">
+  <div class="hd">
+    <div class="t"><span class="dot"></span> MiniAgent</div>
+    <button class="link" id="setBtn" title="跳转工具存储编辑界面">🔗</button>
+  </div>
+
+  <div class="tools" id="tools">
+    <div class="bar" id="toolsBar">
+      <span class="lbl">工具</span>
+      <span style="display:flex;align-items:center;gap:8px;">
+        <span class="cnt" id="toolCnt">启用 3 / 4</span>
+        <span class="chev">▾</span>
+      </span>
+    </div>
+    <div class="body" id="toolsBody">
+      <div class="trow">
+        <div class="ic">🔍</div><div class="meta"><div class="nm">网页搜索</div><div class="ds">联网检索</div></div>
+        <span class="badge b-low">low</span>
+        <label class="sw"><input type="checkbox" checked onchange="recount()"><span class="tk"></span><span class="kn"></span></label>
+      </div>
+      <div class="trow">
+        <div class="ic">📄</div><div class="meta"><div class="nm">DOM 提取</div><div class="ds">读取页面元素</div></div>
+        <span class="badge b-med">medium</span>
+        <label class="sw"><input type="checkbox" checked onchange="recount()"><span class="tk"></span><span class="kn"></span></label>
+      </div>
+      <div class="trow">
+        <div class="ic">⚡</div><div class="meta"><div class="nm">执行 JS</div><div class="ds">页面内运行脚本</div></div>
+        <span class="badge b-high">high</span>
+        <label class="sw"><input type="checkbox" onchange="recount()"><span class="tk"></span><span class="kn"></span></label>
+      </div>
+      <div class="trow">
+        <div class="ic">💾</div><div class="meta"><div class="nm">Memory 写入</div><div class="ds">写入长期记忆</div></div>
+        <span class="badge b-crit">critical</span>
+        <label class="sw"><input type="checkbox" checked onchange="recount()"><span class="tk"></span><span class="kn"></span></label>
+      </div>
+    </div>
+  </div>
+
+  <div class="msgs" id="msgs">
+    <div class="row sys"><div class="bub">已加载 4 个工具 · 工具存储已连接</div></div>
+
+    <div class="row user"><div class="bub">查下本页标题，顺手写进记忆</div></div>
+
+    <div class="row assistant"><div class="bub">好的，先用 DOM 提取拿到标题。</div></div>
+
+    <div class="row assistant">
+      <div class="tool">
+        <div class="th"><span>📄</span><span class="nm">DOM 提取</span><span class="st result">result</span></div>
+        <div class="bd">读取 <code>document.title</code><div class="code">"MiniAgent 项目主页"</div></div>
+      </div>
+    </div>
+
+    <div class="row assistant"><div class="bub">现在写入记忆（需确认）。</div></div>
+
+    <!-- HERO：高风险确认气泡（可交互） -->
+    <div class="row assistant" id="heroRow">
+      <div class="tool">
+        <div class="th"><span>💾</span><span class="nm">Memory 写入</span><span class="st pending">pending</span></div>
+        <div class="bd">写入长期记忆<div class="code">key=last_title<br>value="MiniAgent 项目主页"</div></div>
+        <div class="acts">
+          <button class="btn ok" onclick="approve()">批准</button>
+          <button class="btn no" onclick="deny()">拒绝</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="legend">原型演示 · 点击 💾 气泡的「批准/拒绝」看状态流转</div>
+
+  <div class="inp">
+    <input id="msgInput" placeholder="输入消息…" />
+    <button class="send" id="sendBtn" onclick="sendOrStop()">发送</button>
+  </div>
+</div>
+
+<div class="tip" id="tip">跳转工具存储编辑界面（基座配置在此完成）</div>
+
+<script>
+  // 工具面板折叠
+  document.getElementById('toolsBar').onclick=()=>document.getElementById('tools').classList.toggle('collapsed');
+  function recount(){
+    const on=document.querySelectorAll('#toolsBody input:checked').length;
+    document.getElementById('toolCnt').textContent='启用 '+on+' / 4';
+  }
+  // 设置链接提示
+  const tip=document.getElementById('tip');
+  document.getElementById('setBtn').onclick=(e)=>{
+    const r=e.target.getBoundingClientRect();
+    tip.style.left=(r.left-40)+'px'; tip.style.top=(r.bottom+8)+'px'; tip.style.opacity=1;
+    setTimeout(()=>tip.style.opacity=0,1600);
+  };
+  // HERO 交互：批准 / 拒绝
+  function approve(){
+    const row=document.getElementById('heroRow');
+    row.querySelector('.tool').outerHTML=`
+      <div class="tool">
+        <div class="th"><span>💾</span><span class="nm">Memory 写入</span><span class="st running">running</span></div>
+        <div class="bd"><span class="spin"></span>正在写入长期记忆…</div>
+      </div>`;
+    row.classList.remove('assistant'); // 防重复绑定
+    setTimeout(()=>{
+      row.innerHTML=`<div class="tool">
+        <div class="th"><span>💾</span><span class="nm">Memory 写入</span><span class="st result">result</span></div>
+        <div class="bd">已写入<div class="code">last_title = "MiniAgent 项目主页"</div></div>
+      </div>`;
+    },900);
+  }
+  function deny(){
+    const row=document.getElementById('heroRow');
+    row.innerHTML=`<div class="tool">
+      <div class="th"><span>💾</span><span class="nm">Memory 写入</span><span class="st refused">refused</span></div>
+      <div class="bd muted">用户已拒绝 · 结果已回灌 chat，LLM 将改策略</div>
+    </div>`;
+  }
+  // 发送 / 停止 双态
+  let running=false;
+  function sendOrStop(){
+    const btn=document.getElementById('sendBtn');
+    const input=document.getElementById('msgInput');
+    const msgs=document.getElementById('msgs');
+    if(!running){
+      const txt=input.value.trim(); if(!txt) return;
+      msgs.insertAdjacentHTML('beforeend',`<div class="row user"><div class="bub">${txt}</div></div>
+        <div class="row assistant"><div class="bub">思考中<span class="caret"></span></div></div>`);
+      input.value=''; running=true; btn.textContent='停止'; btn.classList.add('stop');
+      msgs.scrollTop=msgs.scrollHeight;
+      setTimeout(()=>{ // 模拟完成
+        const a=msgs.querySelector('.row.assistant:last-child .bub'); if(a) a.textContent='已处理（原型模拟）。';
+        running=false; btn.textContent='发送'; btn.classList.remove('stop');
+      },1100);
+    }else{
+      msgs.insertAdjacentHTML('beforeend',`<div class="row sys"><div class="bub">已停止</div></div>`);
+      running=false; btn.textContent='发送'; btn.classList.remove('stop');
+      msgs.scrollTop=msgs.scrollHeight;
+    }
+  }
+</script>
+</body>
+</html>
