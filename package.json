@@ -3,26 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "MiniAgent —— 一组基于 React + langchain.js + Ant Design 的 userScript（Tampermonkey / Violentmonkey）",
+  "description": "MiniAgent —— 极简 userScript 智能体（原生 DOM + GM_xmlhttpRequest 桥接 LLM，无框架）",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@langchain/core": "^0.3.0",
-    "@langchain/openai": "^0.3.0",
-    "@sec-ant/gm-fetch": "^1.1.0",
-    "antd": "^5.21.0",
-    "dayjs": "^1.11.13",
-    "langchain": "^0.3.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "@sec-ant/gm-fetch": "^1.1.0"
   },
   "devDependencies": {
-    "@types/react": "^18.3.0",
-    "@types/react-dom": "^18.3.0",
-    "@vitejs/plugin-react": "^6.0.3",
     "typescript": "^5.6.0",
     "vite": "^8.0.0",
     "vite-plugin-monkey": "^8.0.6"

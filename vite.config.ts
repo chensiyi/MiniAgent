@@ -1,33 +1,25 @@
 import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
 import monkey from 'vite-plugin-monkey';
 
-// MiniAgent 构建配置：把 Vite + React + TS 工程打成 Tampermonkey/Violentmonkey userScript
-// react/react-dom/dayjs 是干净 UMD，经 build.externalGlobals 外链 jsdelivr 公共 CDN（生成 @require）
-// ⚠️ antd v5 的 dist/antd.min.js 是 webpack+esl 加载器打包，内部 require('react-dom') 走自己的模块注册表、
-//    找不到 @require 注入的全局 ReactDOM → 报 [MODULE_MISS]"react-dom" is not exists!
-//    故 antd 不打外链、改由 vite 用其 ESM 打进 bundle（无 esl 坑），仅引用全局 React/ReactDOM/dayjs
+// MiniAgent 构建配置（极简版）：纯原生 TS + 手写 DOM，无 React / antd / langchain / 任何框架
+// 全部内联进单文件 userscript，零 @require、零 CDN 依赖，任何页面即开即用
 export default defineConfig({
   plugins: [
-    react(),
     monkey({
-      entry: 'src/app/main.tsx',
+      entry: 'src/agent.ts',
       userscript: {
         name: 'MiniAgent',
         namespace: 'https://github.com/chensiyi/MiniAgent',
-        description: 'React + langchain.js + Ant Design 驱动的 userScript 智能体',
+        description: '极简 userScript 智能体（原生 DOM + GM 桥接 LLM）',
         match: ['*://*/*'], // 注入范围（后续脚本管理可控）
-        grant: ['GM_addStyle', 'GM_setValue', 'GM_getValue', 'GM_xmlhttpRequest'],
+        grant: ['GM_addStyle', 'GM_setValue', 'GM_getValue', 'GM_deleteValue', 'GM_listValues', 'GM_xmlhttpRequest'],
         connect: ['*'], // 直连 LLM 域名（动态）；后续脚本管理可收敛
-      },
-      // 用外网公共 CDN jsdelivr（精确版本，对齐 node_modules 安装），避免镜像源失效/版本滞后
-      build: {
-        externalGlobals: {
-          react: ['React', 'https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js'],
-          'react-dom': ['ReactDOM', 'https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js'],
-          dayjs: ['dayjs', 'https://cdn.jsdelivr.net/npm/dayjs@1.11.21/dayjs.min.js'],
-        },
       },
     }),
   ],
+  build: {
+    // 沙箱环境下 vite 的 emptyOutDir 会走"安全删除"(genie-trash) 并超时，导致 build 失败；
+    // 关闭它，直接覆盖写入 dist，绕开对回收站的依赖
+    emptyOutDir: false,
+  },
 });
