@@ -36,10 +36,11 @@ npm run build     # 产出 dist/MiniAgent.user.js，导入 Tampermonkey 即用
 npm run typecheck # tsc --noEmit
 ```
 
-## 设计文档（开发期位于 webagentcli/docs/，随项目迁出）
+## 设计文档
 
-- `../docs/agent-runtime-thin-relay-design.md` —— v4 设计稿（架构 / 选型 / 范围）
-- `../docs/miniagent-selection-research.md` —— 各分层选型研究（已核实可行性）
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) —— v4 架构设计：注册器 + Bootloader + 消息队列主循环（权威说明）
+
+> 早期随项目迁出的设计稿（`agent-runtime-thin-relay-design.md` / `miniagent-selection-research.md`）已丢失，以本文档为准。
 
 ## 状态
 
