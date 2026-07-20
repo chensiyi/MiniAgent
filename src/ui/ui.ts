@@ -94,6 +94,10 @@ let lastAssistantEl: HTMLElement | null = null, lastToolEl: HTMLElement | null =
 let acEl: HTMLElement | null = null;
 let acItems: { text: string; hint: string }[] = [];
 let acIndex = -1;
+// 供 ui.* 方法在 mount 之后访问的节点与回调引用
+let onSendRef: ((text: string) => void) | null = null;
+let toolsPanelEl: HTMLElement | null = null;
+let toggleBtnEl: HTMLButtonElement | null = null;
 
 // 手动工具命令自动补全：/tool 补工具名，/tool /param 补参数（显示 inputSchema.properties[param].description）
 function computeAc(text: string): { text: string; hint: string }[] {
@@ -191,32 +195,25 @@ export const ui = {
       sendBtn = root.querySelector('.ma-send') as HTMLButtonElement;
       stopBtn = root.querySelector('.ma-stop') as HTMLButtonElement;
       const toolsBtn = root.querySelector('.ma-tools') as HTMLButtonElement;
-      const toolsPanel = root.querySelector('.ma-tools-panel') as HTMLElement;
+      toolsPanelEl = root.querySelector('.ma-tools-panel') as HTMLElement;
       acEl = document.createElement('div'); acEl.className = 'ma-ac'; acEl.style.display = 'none';
       (root.querySelector('.ma-input-row') as HTMLElement).append(acEl);
-      toolsBtn.onclick = () => {
-        if (toolsPanel.style.display === 'none') { renderToolsPanel(toolsPanel); toolsPanel.style.display = ''; }
-        else toolsPanel.style.display = 'none';
-      };
-      const toggleBtn = root.querySelector('.ma-toggle') as HTMLButtonElement;
-      toggleBtn.onclick = () => {
-        const collapsed = root.classList.toggle('ma-collapsed');
-        toggleBtn.textContent = collapsed ? '▴' : '▾';
-        // 展开时若工具面板此前开着，刷新其开关状态（运行时可能已变化）
-        if (!collapsed && toolsPanel.style.display === '') renderToolsPanel(toolsPanel);
-      };
+      onSendRef = onSend;
+      toolsBtn.onclick = () => ui.tools.toggle();
+      toggleBtnEl = root.querySelector('.ma-toggle') as HTMLButtonElement;
+      toggleBtnEl.onclick = () => ui.panel.toggle();
       const doSend = (): void => {
         const text = input.value.trim(); if (!text) return;
-        input.value = ''; if (acEl) acEl.style.display = 'none'; onSend(text);
+        input.value = ''; if (acEl) acEl.style.display = 'none'; onSendRef?.(text);
       };
       sendBtn.onclick = doSend;
-      input.oninput = () => updateAc();
+      input.oninput = () => ui.chat.refreshAutocomplete();
       input.onblur = () => { if (acEl) acEl.style.display = 'none'; };
       input.onkeydown = (e) => {
         if (acEl && acEl.style.display !== 'none' && acItems.length) {
           if (e.key === 'ArrowDown') { e.preventDefault(); acIndex = (acIndex + 1) % acItems.length; renderAc(); return; }
           if (e.key === 'ArrowUp') { e.preventDefault(); acIndex = (acIndex - 1 + acItems.length) % acItems.length; renderAc(); return; }
-          if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); if (acIndex >= 0) acceptAc(acItems[acIndex].text); return; }
+          if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); if (acIndex >= 0) ui.chat.acceptAutocomplete(acItems[acIndex].text); return; }
           if (e.key === 'Escape') { acEl.style.display = 'none'; return; }
         }
         if (e.key === 'Enter') { e.preventDefault(); doSend(); }
@@ -289,6 +286,50 @@ export const ui = {
       input.disabled = running;
       if (running && onStop) stopBtn.onclick = onStop;
     },
+
+    // 触发发送（等同点击「发送」）
+    send(): void {
+      const text = input?.value.trim(); if (!text || !onSendRef) return;
+      if (input) input.value = ''; if (acEl) acEl.style.display = 'none'; onSendRef(text);
+    },
+    // 设置输入框内容并刷新自动补全
+    setInput(text: string): void { if (!input) return; input.value = text; updateAc(); },
+    // 依据当前输入框内容刷新手动工具命令自动补全
+    refreshAutocomplete(): void { updateAc(); },
+    // 接受某个自动补全项（insert 为含尾部空格的插入文本）
+    acceptAutocomplete(insert: string): void { acceptAc(insert); },
+  },
+
+  // 面板折叠/展开控制（行为抽离，便于外部调用）
+  panel: {
+    toggle(): void {
+      if (!root || !toggleBtnEl) return;
+      const collapsed = root.classList.toggle('ma-collapsed');
+      toggleBtnEl.textContent = collapsed ? '▴' : '▾';
+      if (!collapsed && toolsPanelEl && toolsPanelEl.style.display === '') renderToolsPanel(toolsPanelEl);
+    },
+    setCollapsed(c: boolean): void {
+      if (!root || !toggleBtnEl) return;
+      const now = root.classList.contains('ma-collapsed');
+      if (now === c) return;
+      root.classList.toggle('ma-collapsed', c);
+      toggleBtnEl.textContent = c ? '▴' : '▾';
+      if (!c && toolsPanelEl && toolsPanelEl.style.display === '') renderToolsPanel(toolsPanelEl);
+    },
+    isCollapsed(): boolean { return !!root && root.classList.contains('ma-collapsed'); },
+  },
+
+  // 工具启停面板控制
+  tools: {
+    toggle(): void {
+      if (!toolsPanelEl) return;
+      if (toolsPanelEl.style.display === 'none') { renderToolsPanel(toolsPanelEl); toolsPanelEl.style.display = ''; }
+      else toolsPanelEl.style.display = 'none';
+    },
+    open(): void { if (!toolsPanelEl) return; renderToolsPanel(toolsPanelEl); toolsPanelEl.style.display = ''; },
+    close(): void { if (toolsPanelEl) toolsPanelEl.style.display = 'none'; },
+    // 面板正打开时刷新开关列表（运行时状态可能已变化）
+    refresh(): void { if (toolsPanelEl && toolsPanelEl.style.display !== 'none') renderToolsPanel(toolsPanelEl); },
   },
 
   // 人工确认闸（withHooks 异步闸门）：base 弹原生确认气泡，true=允许
