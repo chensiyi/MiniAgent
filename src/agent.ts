@@ -28,7 +28,7 @@ export const agent = {
   toolCallQueue: [] as ToolCall[], // 待执行的工具调用
   sessionId: '', // 当前会话 id（由 session 工具的 onRegister 生成）
   storage, // 逻辑存储层（命名空间分区），供运行时 / LLM 动态读写与编辑
-  llm, executor, // 暴露给 LLM 做自编排：动态注册工具 / 直接推理
+  llm, executor, ui, // 暴露给 LLM 做自编排：动态注册工具 / 直接推理 / 工具可经 ui.chat 接管渲染
   tools: new Map<string, ToolDef>(), // 按名挂载的权威表（文档 §5.2）
   _engineActive: false, // 引擎是否在跑（防止并发起多个引擎）
 

@@ -17,6 +17,12 @@ if (_tt) {
 }
 function setHTML(el: Element, html: string): void { el.innerHTML = _hp ? (_hp.createHTML(html) as unknown as string) : html; }
 
+// UI markdown 渲染钩子点：默认用 tools/marked.ts 的 renderMarkdown（依赖全局 marked/DOMPurify，
+// 由 agent.ts 的 ensureExternalLibs 在启动期加载兜底）；渲染型工具（如 marked 工具）可在 register
+// 时经 setMarkdownRenderer 接管，unregister 时经 resetMarkdownRenderer 还原。这样"自动渲染"
+// 由工具自身驱动，核心不依赖某工具，工具离线/卸载即恢复默认渲染器。
+let markdownRenderer: (text: string) => string = renderMarkdown;
+
 // 玻璃方框浮层（对齐 docs/ui-design.html v4）：容器透明无背景板、无圆角、深色玻璃 + 浅色字、顶部遮罩淡出
 const STYLE = `
 :root{--brand:#378DDD;--brand-soft:rgba(55,141,221,.22);--glass:rgba(18,26,44,.52);--glass-strong:rgba(22,31,52,.66);--glass-border:rgba(255,255,255,.16);--glass-border-strong:rgba(255,255,255,.26);--text:#eef2ff;--text-dim:rgba(238,242,255,.62);--risk-high:#fb923c}
@@ -42,7 +48,7 @@ const STYLE = `
 .ma-approve .no{background:rgba(255,255,255,.12);color:var(--text)}
 .ma-risk{color:var(--risk-high);font-weight:600}
 .ma-tools{padding:8px 10px;border:1px solid var(--glass-border);background:var(--glass);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);cursor:pointer}
-.ma-tools-panel{padding:8px;border:1px solid var(--glass-border-strong);background:var(--glass-strong);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);display:flex;flex-direction:column;gap:4px;max-height:40vh;overflow:auto}
+.ma-tools-panel{padding:8px;border:1px solid var(--glass-border-strong);background:var(--glass-strong);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);display:flex;flex-direction:column;gap:4px;min-height:120px;max-height:40vh;overflow:auto}
 .ma-tool-row{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px}
 .ma-tool-name{word-break:break-all;flex-shrink:0}
 .ma-tool-desc{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;color:var(--text-dim);font-size:11px}
@@ -62,9 +68,7 @@ const STYLE = `
 .ma-md-content th,.ma-md-content td{border:1px solid var(--glass-border);padding:2px 6px}
 .ma-md-content hr{border:0;border-top:1px solid var(--glass-border);margin:8px 0}
 .ma-md-content a{color:#6fb0f0}
-.ma-header{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:3px 8px;border:1px solid var(--glass-border);background:var(--glass);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
-.ma-title{font-size:11px;letter-spacing:.5px;color:var(--text-dim);user-select:none}
-.ma-toggle{padding:1px 7px;border:1px solid var(--glass-border);background:rgba(255,255,255,.08);color:var(--text);cursor:pointer;font-size:13px;line-height:1.4}
+.ma-toggle{display:block;width:100%;padding:2px 0;margin:0;text-align:center;border:1px solid var(--glass-border);background:var(--glass);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);color:var(--text);cursor:pointer;font-size:11px;line-height:1.3}
 .ma-toggle:hover{background:rgba(255,255,255,.16)}
 .ma-collapsed .ma-bubbles,.ma-collapsed .ma-input-row,.ma-collapsed .ma-tools-panel{display:none}
 `;
@@ -171,7 +175,7 @@ export const ui = {
       GM_addStyle(STYLE);
       root = document.createElement('div'); root.id = 'miniagent-root';
       setHTML(root, `
-        <div class="ma-header"><span class="ma-title">MiniAgent</span><button class="ma-toggle" type="button" title="折叠/展开面板">▾</button></div>
+        <button class="ma-toggle" type="button" title="折叠/展开面板">▾</button>
         <div class="ma-bubbles"></div>
         <div class="ma-input-row">
           <button class="ma-tools" type="button" title="工具开关">⚙</button>
@@ -258,13 +262,24 @@ export const ui = {
       bubbles.scrollTop = bubbles.scrollHeight;
     },
 
-    // 流结束：assistant 正文 + think 正文做 markdown 渲染（一次性，避免流式频繁 setHTML）
+    // 替换 / 恢复 markdown 渲染器（供 marked 等渲染型工具接管 UI 渲染）。
+    // setMarkdownRenderer(fn)：fn(text:string)=>string 返回（已清洗的）HTML，接管助手消息与思考渲染。
+    // resetMarkdownRenderer()：恢复默认 renderMarkdown（依赖全局 marked，由 ensureExternalLibs 兜底）。
+    setMarkdownRenderer(fn: (text: string) => string): void {
+      markdownRenderer = fn;
+    },
+    resetMarkdownRenderer(): void {
+      markdownRenderer = renderMarkdown;
+    },
+
+    // 流结束：assistant 正文 + think 正文做 markdown 渲染（一次性，避免流式频繁 setHTML）。
+    // 渲染走可替换的 markdownRenderer（默认 renderMarkdown；marked 工具注册后由其接管）。
     finalizeLast(role: string, text: string, reasoning?: string): void {
       const el = role === 'assistant' ? lastAssistantEl : null;
       if (!el) return;
-      const c = el.querySelector('.ma-md-content') as HTMLElement; if (c) setHTML(c, renderMarkdown(text));
+      const c = el.querySelector('.ma-md-content') as HTMLElement; if (c) setHTML(c, markdownRenderer(text));
       const think = el.querySelector('.ma-think') as HTMLElement;
-      if (think) { if (reasoning) { const tb = el.querySelector('.ma-think-body') as HTMLElement; if (tb) setHTML(tb, renderMarkdown(reasoning)); } else think.remove(); }
+      if (think) { if (reasoning) { const tb = el.querySelector('.ma-think-body') as HTMLElement; if (tb) setHTML(tb, markdownRenderer(reasoning)); } else think.remove(); }
     },
 
     // 运行态：发送变身停止（绑 onStop=agent.chatStop）并禁用输入

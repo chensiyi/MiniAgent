@@ -162,26 +162,43 @@ function indentBlock(s: string, pad: string): string {
 }
 
 // 把一个工具定义/描述符导出为可直接注册的 JS 源码（控制台粘贴即用）。
-// 自编排工具优先用持久化的源码串（call/register/unregister 皆为可重编译文本）；
-// 内置工具退化为函数 toString —— 若其 call 体引用了模块内闭包（ui/storage 等），跨上下文重注册需自行调整。
+// 修复（2026-07-21）：旧实现把 call/register/unregister 作为"源码字符串"直接塞进对象再调
+//   executor.register，而 register 要求 call 是函数 → 重注册失败（字符串被当函数调用抛错、
+//   list() 因 typeof call!=='function' 把工具排除、运行期报"无 call 入口"）。
+// 新实现：导出一个自包含 IIFE 片段 —— 用 new Function 把持久化的源码串编译回函数
+//   （call/register/unregister；含安装期内联的库 IIFE），再 executor.register + 持久化到 tools 命名空间，
+//   使其重载后仍能自动重建。自编排工具（含内联库）因此真正"可独立重注册"。
 export function exportToolToJs(desc: ToolDesc): string {
   const header = [
     `// MiniAgent 工具导出：${desc.name}`,
-    '// 复制以下代码到浏览器控制台（需 agent 在作用域，如 globalThis.agent）执行即可注册该工具。',
+    '// 复制以下代码到浏览器控制台（agent 需在作用域，如 globalThis.agent）执行即可注册并持久化该工具。',
+    '// 自编排工具含安装期内联依赖库（/libs），导出即自包含、可独立重注册；重载按描述符自动重建。',
   ].join('\n');
   const parts: string[] = [];
-  parts.push('const __tool = {');
-  parts.push(`  name: ${JSON.stringify(desc.name)},`);
-  parts.push(`  author: ${JSON.stringify(desc.author ?? SYS_AUTHOR)},`);
-  parts.push(`  description: ${JSON.stringify(desc.description)},`);
-  parts.push(`  inputSchema: ${indentBlock(JSON.stringify(desc.inputSchema ?? {}, null, 2), '  ')},`);
-  if (desc.deps && desc.deps.length) parts.push(`  deps: ${indentBlock(JSON.stringify(desc.deps, null, 2), '  ')},`);
-  if (desc.riskLevel) parts.push(`  riskLevel: ${JSON.stringify(desc.riskLevel)},`);
-  parts.push(`  call: ${desc.code},`);
-  if (desc.register) parts.push(`  register: ${desc.register},`);
-  if (desc.unregister) parts.push(`  unregister: ${desc.unregister},`);
-  parts.push('};');
-  parts.push('(globalThis.agent?.executor ?? (typeof executor !== "undefined" ? executor : null))?.register(__tool);');
+  parts.push('(function () {');
+  parts.push('  const agent = globalThis.agent;');
+  parts.push('  const executor = agent && agent.executor;');
+  parts.push('  const storage = agent && agent.storage;');
+  parts.push('  if (!executor) { console.error("[MiniAgent] 导出注册失败：agent.executor 不可用"); return; }');
+  // 把持久化"源码串"编译回函数（call/register/unregister 皆为可重编译文本，含内联库 IIFE）
+  parts.push("  const buildFn = (src) => src ? new Function('\"use strict\"; return (' + src + ');')() : undefined;");
+  parts.push('  const desc = {');
+  parts.push(`    name: ${JSON.stringify(desc.name)},`);
+  parts.push(`    author: ${JSON.stringify(desc.author ?? SYS_AUTHOR)},`);
+  parts.push(`    description: ${JSON.stringify(desc.description)},`);
+  parts.push(`    inputSchema: ${indentBlock(JSON.stringify(desc.inputSchema ?? {}, null, 2), '    ')},`);
+  if (desc.deps && desc.deps.length) parts.push(`    deps: ${indentBlock(JSON.stringify(desc.deps, null, 2), '    ')},`);
+  if (desc.riskLevel) parts.push(`    riskLevel: ${JSON.stringify(desc.riskLevel)},`);
+  parts.push(`    code: ${desc.code},`);
+  if (desc.register) parts.push(`    register: ${desc.register},`);
+  if (desc.unregister) parts.push(`    unregister: ${desc.unregister},`);
+  parts.push(`    enabled: ${desc.enabled === false ? 'false' : 'true'},`);
+  parts.push('  };');
+  parts.push('  const tool = { ...desc, call: buildFn(desc.code), register: buildFn(desc.register), unregister: buildFn(desc.unregister) };');
+  parts.push('  executor.register(tool);'); // 注册（含依赖校验/同名替换）
+  parts.push('  if (storage) storage.set("tools", desc.name, desc);'); // 持久化（含内联库源码，重载自动重建）
+  parts.push('  console.log("[MiniAgent] 已注册并持久化工具:", desc.name);');
+  parts.push('})();');
   return header + '\n' + parts.join('\n');
 }
 

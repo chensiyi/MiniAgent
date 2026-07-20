@@ -1,9 +1,11 @@
 // 独立 markdown 渲染工具（位于根目录 tools/，与 UI 解耦）
-// 渲染引擎：外部引入的 marked（核心聊天渲染由 agent.ts 的 ensureExternalLibs 在启动期从
-//   jsDelivr 拉取为全局变量 marked；用户自建工具可用 tool_manager register 的 /libs 在安装期内联 marked）。
-// 安全：渲染输出经外部 DOMPurify 清洗，避免 LLM 内容带来的 XSS；
+// 渲染引擎：外部引入的 marked（用户用 tool_manager register 的 /libs 在安装期内联 marked+DOMPurify，
+//   自此工具自包含、离线可用；参数名 raw）。
+// 安全：渲染输出经内联 DOMPurify 清洗，避免 LLM 内容带来的 XSS；
 //       marked / DOMPurify 任一不可用时，回退为转义纯文本，保证不崩。
-// 接入点：ui.ts 的 finalizeLast 调用 renderMarkdown，把助手正文 / think 正文渲染为 HTML。
+// 自动渲染接入点：marked 工具 register 时经 ctx.agent.ui.chat.setMarkdownRenderer 接管 UI 渲染，
+//   把助手正文 / think 正文自动渲染为 HTML；unregister 时经 resetMarkdownRenderer 还原默认渲染器。
+//   （默认渲染器仍由本模块的 renderMarkdown 提供，依赖全局 marked，由 agent.ts 的 ensureExternalLibs 兜底。）
 
 declare const marked: {
   parse(src: string, options?: Record<string, unknown>): string;
