@@ -415,16 +415,29 @@ function genSessionId(): string {
 //    删除为破坏性操作，仅 del 动作经 ui.requestApproval 确认闸（其余动作无摩擦）。
 const gmStorageTool: ToolDef = {
   name: 'gm_storage',
-  author: 'core',
+  author: 'sys',
   description: '统一的持久存储管理（默认 memory 命名空间，可指定其它 ns）。action 取值：get=读取键；set=写入键（update=true 时合并已有对象）；list=列出键（给定 ns 列该分区子键，不给 ns 按 default/config/sessions/tools/code/memory 分区概览）；del=删除键（不可恢复，删除前会请求确认）。用于记忆、配置、状态管理。',
   inputSchema: {
     type: 'object',
     properties: {
-      action: { type: 'string', enum: ['get', 'set', 'list', 'del'], description: '操作类型' },
-      key: { type: 'string', description: '键名（get/set/del 必需）' },
-      value: { type: 'string', description: '要保存的值（set 必需，建议 JSON 字符串）' },
-      ns: { type: 'string', description: '可选命名空间，默认 memory' },
-      update: { type: 'boolean', description: 'set 专用：合并模式，读取已有值并合并对象' },
+      action: {
+        type: 'string',
+        enum: ['get', 'set', 'list', 'del'],
+        description: '操作类型：get=读取某个键的值；set=写入/更新某个键；list=列出命名空间下的键（不给 ns 则按 default/config/sessions/tools/code/memory 分区概览）；del=删除某个键（不可恢复，删除前会请求用户确认）。',
+      },
+      key: { type: 'string', description: '键名。get/set/del 必需；list 不需要。' },
+      value: {
+        type: 'string',
+        description: '要保存的值（set 必需）。会原样写入存储；get 时以 JSON 字符串形式返回，因此对象/数组等复杂值建议先 JSON 序列化后传入。',
+      },
+      ns: {
+        type: 'string',
+        description: "可选命名空间（分区）。默认 memory；也可用 default/config/sessions/tools/code 等已有分区，或自定义新分区。",
+      },
+      update: {
+        type: 'boolean',
+        description: '仅 set 生效。为 true 时进入合并模式：先读取已有值，再把传入的值（对象）浅合并进去，而非整条覆盖。',
+      },
     },
     required: ['action'],
   },
@@ -481,13 +494,16 @@ const gmStorageTool: ToolDef = {
 // 4) 运行代码：自我开发执行入口，经人工确认闸（executor.run base 内）
 const codeRunTool: ToolDef = {
   name: 'code_run',
-  author: 'core',
+  author: 'sys',
   riskLevel: 'high',
   description: '执行JS代码。危险操作，执行前会请求用户确认。',
   inputSchema: {
     type: 'object',
     properties: {
-      code: { type: 'string', description: '直接传入要执行的 JS 源码' },
+      code: {
+        type: 'string',
+        description: '要执行的 JS 源码。会以 new Function(\'ctx\', ...) 方式运行：函数体内可通过参数 ctx 访问运行时上下文（ctx.storage 存储 / ctx.executor 注册器 / ctx.agent 单例 / ctx.console 沙箱打印）。return 的值将作为执行结果回显。执行前会请求用户确认。',
+      },
     },
   },
   call: (args, ctx) => {
@@ -507,32 +523,44 @@ const codeRunTool: ToolDef = {
 //    action 区分操作：register=注册/创建 / remove=删除 / list=枚举。
 const toolManagerTool: ToolDef = {
   name: 'tool_manager',
-  author: 'core',
-  description: '统一的工具自编排管理。action 取值：register=注册/创建新工具（持久化到 tools 命名空间，重载按依赖拓扑自动重建；code 为 call 源码，register 可选为安装源码）；remove=删除一个自编排工具（移除持久化并注销）；list=枚举当前所有已注册工具（含无 call 的系统原语），供查看完整能力面。',
+  author: 'sys',
+  description: '统一的工具自编排管理。action 取值：register=注册/创建新工具（持久化到 tools 命名空间，重载按依赖拓扑自动重建；code 为 call 源码，register 可选为安装源码）；remove=删除工具（移除持久化并注销）；list=枚举当前所有已注册工具（含无 call 的系统原语），供查看完整能力面；export=导出工具完整定义（含 call/register/unregister 源码）为 JS 代码。注：自编排工具导出的是可重注册的源码串；内置（sys）工具导出的 call 来自函数反编译，可能引用模块内部状态，仅作查看/参考，不保证可独立运行。',
   inputSchema: {
     type: 'object',
     properties: {
-      action: { type: 'string', enum: ['register', 'remove', 'list'], description: '操作类型' },
-      name: { type: 'string', description: '工具名（register/remove 必需；与 author 组合唯一）' },
-      author: { type: 'string', description: '可选作者，默认 core' },
-      description: { type: 'string', description: '工具说明（register 必需）' },
-      inputSchema: { type: 'object', description: 'JSON Schema 参数声明（register 必需）' },
-      deps: { type: 'array', description: '可选前置依赖 [{name, author?, version?}]' },
-      riskLevel: { type: 'string', enum: ['low', 'medium', 'high', 'critical'], description: '可选风险级别' },
-      code: { type: 'string', description: 'call 源码：(args, ctx) => string（register 必需）' },
-      register: { type: 'string', description: '可选：安装/重建源码 (ctx) => void（register 用）' },
+      action: {
+        type: 'string',
+        enum: ['register', 'remove', 'list', 'export'],
+        description: '操作类型：register=创建/注册新工具（持久化到 tools 命名空间，重载按依赖拓扑自动重建）；remove=删除工具（注销并移除持久化）；list=枚举当前所有已注册工具（含无 call 的系统原语）；export=导出工具完整定义（含 call/register/unregister 源码）为 JS 代码。内置（sys）工具导出的 call 来自函数反编译，可能引用模块内部状态，仅作查看/参考。',
+      },
+      name: { type: 'string', description: '工具名（register/remove/export 必需）。按 name 匹配（注册时与 author 组合成唯一标识）。' },
+      author: { type: 'string', description: `可选作者名（默认 "${SYS_AUTHOR}"；与 name 组合唯一；覆盖既有工具即替换，需用户确认）。` },
+      description: { type: 'string', description: '工具说明（register 必需），会展示给 LLM 作为该工具的能力描述。' },
+      inputSchema: {
+        type: 'object',
+        description: '新工具的参数声明（JSON Schema，register 必需）。格式如 { type:"object", properties: { 参数名: { type, description, ... } }, required: ["参数名"] }，会直接传给 LLM 决定如何调用。',
+      },
+      deps: { type: 'array', description: '可选前置依赖，元素形如 { name, author?, version? }；按 name 匹配，author 不符仅警告、缺失则拒绝注册。' },
+      riskLevel: {
+        type: 'string',
+        enum: ['low', 'medium', 'high', 'critical'],
+        description: '可选风险级别：low=无摩擦；medium=中等；high=执行/删除等破坏性操作前弹确认框；critical=最高风险。默认 low。',
+      },
+      code: { type: 'string', description: 'call 源码（register 必需），签名为 (args, ctx) => string，返回字符串作为工具观察结果回灌 LLM。' },
+      register: { type: 'string', description: '可选：安装/重建源码 (ctx) => void（register 用），在工具注册时执行（如挂载钩子、注入编排），重载会自动重建。' },
     },
     required: ['action'],
   },
-  call: (args, ctx) => {
+  call: async (args, ctx) => {
     const action = String(args.action ?? '');
     switch (action) {
       case 'register': {
         const name = String(args.name ?? '');
         if (!name) return '参数 name 缺失';
+        const authorArg = args.author ? String(args.author) : SYS_AUTHOR;
         const desc: ToolDesc = {
           name,
-          author: args.author ? String(args.author) : 'core',
+          author: authorArg,
           description: String(args.description ?? ''),
           inputSchema: (args.inputSchema as Record<string, unknown>) ?? { type: 'object', properties: {} },
           deps: (args.deps as DepRef[]) ?? undefined,
@@ -547,13 +575,20 @@ const toolManagerTool: ToolDef = {
         } catch (e) {
           return `工具代码编译失败: ${e instanceof Error ? e.message : String(e)}`;
         }
+        // 经用户确认后更新（用户 2026-07-20："所有工具均可经用户确认后更新"）。
+        // 闸门=用户确认，author 不再作为编辑限制；同名则先注销旧再注册新 → systool 可被用户替换。
+        const confirmed = await ui.requestApproval({ name: `tool_manager.register(${name})`, code: desc.code, riskLevel: 'high' });
+        if (!confirmed) return '已取消';
         ctx.storage.set('tools', name, desc); // 持久化（真相源）
-        const ok = ctx.executor.register(tool); // 注册（含依赖校验）
+        const ok = ctx.executor.register(tool); // 注册（含依赖校验；同名则替换）
         return ok ? `已创建工具 ${name}（已持久化 + 注册）` : `工具 ${name} 注册被拒（依赖缺失或 author 冲突）`;
       }
       case 'remove': {
         const name = String(args.name ?? '');
         if (!name) return '参数 name 缺失';
+        // 经用户确认后删除（任何工具均可，含 systool；闸门=用户确认，不再按 author 限制）
+        const confirmed = await ui.requestApproval({ name: `tool_manager.remove(${name})`, riskLevel: 'high' });
+        if (!confirmed) return '已取消';
         ctx.storage.del('tools', name);
         ctx.executor.unregister(name);
         return `已移除工具 ${name}`;
@@ -563,7 +598,7 @@ const toolManagerTool: ToolDef = {
         return JSON.stringify(
           all.map((t) => ({
             name: t.name,
-            author: t.author ?? 'core',
+            author: t.author ?? SYS_AUTHOR,
             description: t.description,
             deps: t.deps ?? [],
             riskLevel: t.riskLevel ?? 'low',
@@ -791,7 +826,7 @@ function flushSession(agent: AgentLike, st: typeof storage): void {
 
 const sessionTool: ToolDef = {
   name: 'session',
-  author: 'core',
+  author: 'sys',
   description:
     '会话管理：注册后自动把对话消息落盘到 session 命名空间（session:<id>），并在 default:sessions 建索引。' +
     'action：info=查看当前会话(默认)；save=立即落盘；list=列出全部会话；create=开新会话并清空上下文；' +

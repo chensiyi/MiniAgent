@@ -61,7 +61,7 @@ function renderToolsPanel(panel: HTMLElement): void {
   for (const s of executor.allToolStates()) {
     const row = document.createElement('label'); row.className = 'ma-tool-row';
     const name = document.createElement('span'); name.className = 'ma-tool-name';
-    name.textContent = s.author && s.author !== 'core' ? `${s.name} @${s.author}` : s.name;
+    name.textContent = s.author && s.author !== 'sys' ? `${s.name} @${s.author}` : s.name;
     const desc = document.createElement('span'); desc.className = 'ma-tool-desc';
     desc.textContent = s.description ?? '';
     desc.title = s.description ?? ''; // 鼠标悬停看全文
