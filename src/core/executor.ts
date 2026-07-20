@@ -1,8 +1,21 @@
 import { storage } from './storage';
-import { ui } from '../ui/ui';
 import { llm } from './llm';
 import { REQUIRE_CODE_APPROVAL, APPROVAL_RISK_LEVEL, riskAtLeast, getConfig, saveConfig, getSystemPrompt } from '../model/config';
 import { withHooks, type HookedFunction } from './withHooks';
+
+// 核心审批闸（带钩子，可被 orchestrate 钩子接管）：经通用能力注册表取 UI 提供的审批能力；
+// 核心不硬引用 ui 模块——UI 作为可插拔组件挂载时注册 'approval' 能力，headless 未挂载则自动放行。
+// 这样"人类确认"这一 UI 行为被解耦，核心可在无 UI 环境运行（自动化场景）。
+export const requestApproval = withHooks(async function (
+  call: { name: string; code?: string; riskLevel?: string },
+  agentRef?: AgentLike,
+): Promise<boolean> {
+  const ext = agentRef && (agentRef as unknown as { extensions?: Map<string, unknown> }).extensions;
+  const fn = ext && typeof ext.get === 'function' ? ext.get('approval') : null;
+  if (typeof fn === 'function') return (fn as (c: { name: string; code?: string; riskLevel?: string }) => Promise<boolean>)(call);
+  console.warn(`[MiniAgent] 无审批闸（UI 未挂载），自动放行：${call.name}`);
+  return true;
+});
 
 // executor 的结构化视图（避免 typeof executor 前向引用）
 export interface ExecutorLike {
@@ -380,7 +393,7 @@ export const executor = {
   },
 
   // 执行一个工具调用，返回"观察结果"文本，回灌给 LLM 作为 tool 消息。
-  // 危险工具确认闸在 base 内（code_run 或 riskLevel≥high/critical 时 await ui.requestApproval）。
+  // 危险工具确认闸在 base 内（code_run 或 riskLevel≥high/critical 时 await requestApproval(..., ctx.agent)）。
   // ctx.agent / ctx.this 由调用方（engine）注入，避免 executor 依赖 agent。
   run: withHooks(async (call: ToolCall, agentArg?: AgentLike): Promise<string> => {
     const tool = registry.get(call.name);
@@ -392,7 +405,7 @@ export const executor = {
       REQUIRE_CODE_APPROVAL && (call.name === 'code_run' || riskAtLeast(tool.riskLevel, APPROVAL_RISK_LEVEL));
     if (needApproval) {
       const code = call.args.code;
-      const ok = await ui.requestApproval({ name: call.name, code, riskLevel: tool.riskLevel });
+      const ok = await requestApproval({ name: call.name, code, riskLevel: tool.riskLevel }, agentArg ?? _agent!);
       if (!ok) return '用户拒绝了执行';
     }
     const ctx: RunCtx = { storage, executor, agent: agentArg ?? _agent!, this: agentArg ?? _agent!, console };
@@ -459,7 +472,7 @@ function genSessionId(): string {
 
 // 1) 统一的持久存储管理（整合原 storage_get/set/list/del）
 //    action 区分操作：get=读取 / set=写入 / list=列出 / del=删除。
-//    删除为破坏性操作，仅 del 动作经 ui.requestApproval 确认闸（其余动作无摩擦）。
+//    删除为破坏性操作，仅 del 动作经 requestApproval 确认闸（其余动作无摩擦）。
 const gmStorageTool: ToolDef = {
   name: 'gm_storage',
   author: 'sys',
@@ -527,7 +540,7 @@ const gmStorageTool: ToolDef = {
       case 'del': {
         const key = String(args.key ?? '');
         if (!key) return '参数 key 缺失';
-        const ok = await ui.requestApproval({ name: `gm_storage:del ${ns}:${key}`, riskLevel: 'high' });
+        const ok = await requestApproval({ name: `gm_storage:del ${ns}:${key}`, riskLevel: 'high' }, ctx.agent);
         if (!ok) return '用户拒绝了执行';
         ctx.storage.del(ns, key);
         return `已删除 ${ns}:${key}`;
@@ -648,7 +661,7 @@ const toolManagerTool: ToolDef = {
         // 经用户确认后更新（用户 2026-07-20："所有工具均可经用户确认后更新"）。
         // 闸门=用户确认，author 不再作为编辑限制；同名则先注销旧再注册新 → systool 可被用户替换。
         // 确认框展示用户原始 code（不含内联库源码，避免冗长）
-        const confirmed = await ui.requestApproval({ name: `tool_manager.register(${name})`, code: String(args.code ?? ''), riskLevel: 'high' });
+        const confirmed = await requestApproval({ name: `tool_manager.register(${name})`, code: String(args.code ?? ''), riskLevel: 'high' }, ctx.agent);
         if (!confirmed) return '已取消';
         ctx.storage.set('tools', name, desc); // 持久化（真相源，含内联库）
         // 默认停用：仅持久化、不进运行期注册表（不进 LLM 清单、不可调用）；enabled=true 才注册（含依赖校验；同名则替换）
@@ -660,7 +673,7 @@ const toolManagerTool: ToolDef = {
         const name = String(args.name ?? '');
         if (!name) return '参数 name 缺失';
         // 经用户确认后删除（任何工具均可，含 systool；闸门=用户确认，不再按 author 限制）
-        const confirmed = await ui.requestApproval({ name: `tool_manager.remove(${name})`, riskLevel: 'high' });
+        const confirmed = await requestApproval({ name: `tool_manager.remove(${name})`, riskLevel: 'high' }, ctx.agent);
         if (!confirmed) return '已取消';
         ctx.storage.del('tools', name);
         ctx.executor.unregister(name);
@@ -737,7 +750,7 @@ function resolveTarget(name: string, agentRef: AgentLike): HookedFunction | null
     run: executor.run as unknown as HookedFunction,
     streamChat: llm.streamChat as unknown as HookedFunction,
     chat: llm.chat as unknown as HookedFunction,
-    requestApproval: ui.requestApproval as unknown as HookedFunction,
+    requestApproval: requestApproval as unknown as HookedFunction,
     storageSet: storage.set as unknown as HookedFunction,
   };
   return map[name] ?? null;
@@ -822,7 +835,7 @@ const orchestrateTool: ToolDef = {
       );
     }
     if (action === 'update') {
-      const ok = await ui.requestApproval({ name: 'orchestrate.update', riskLevel: 'high', code: String(args.systemPrompt ?? '') });
+      const ok = await requestApproval({ name: 'orchestrate.update', riskLevel: 'high', code: String(args.systemPrompt ?? '') }, ctx.agent);
       if (!ok) return '已取消';
       const sp = String(args.systemPrompt ?? '');
       if (!sp) return 'systemPrompt 不能为空';
@@ -836,7 +849,7 @@ const orchestrateTool: ToolDef = {
     }
     if (action === 'addHook') {
       const codeStr = String(args.code ?? '');
-      const ok = await ui.requestApproval({ name: 'orchestrate.addHook', riskLevel: 'high', code: codeStr });
+      const ok = await requestApproval({ name: 'orchestrate.addHook', riskLevel: 'high', code: codeStr }, ctx.agent);
       if (!ok) return '已取消';
       const target = resolveTarget(String(args.target ?? ''), ctx.agent);
       if (!target) return `未知 target: ${args.target}（可选: ${HOOK_TARGETS.join('/')}）`;
@@ -859,7 +872,7 @@ const orchestrateTool: ToolDef = {
       const id = String(args.hookId ?? '');
       const name = String(args.name ?? '');
       if (!id && !name) return 'removeHook 需提供 hookId 或 name（按 name 移除所有同名用户钩子）';
-      const ok = await ui.requestApproval({ name: 'orchestrate.removeHook', riskLevel: 'high', code: id || name });
+      const ok = await requestApproval({ name: 'orchestrate.removeHook', riskLevel: 'high', code: id || name }, ctx.agent);
       if (!ok) return '已取消';
       // 回收：同时按 hookId / name 在所有钩子目标里移除匹配的用户钩子（core 钩子不可经此移除）
       let removed = 0;

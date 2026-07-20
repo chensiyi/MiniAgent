@@ -3,8 +3,10 @@
 //   自此工具自包含、离线可用；参数名 raw）。
 // 安全：渲染输出经内联 DOMPurify 清洗，避免 LLM 内容带来的 XSS；
 //       marked / DOMPurify 任一不可用时，回退为转义纯文本，保证不崩。
-// 自动渲染接入点：marked 工具 register 时经 ctx.agent.ui.chat.setMarkdownRenderer 接管 UI 渲染，
-//   把助手正文 / think 正文自动渲染为 HTML；unregister 时经 resetMarkdownRenderer 还原默认渲染器。
+// 自动渲染接入点：marked 工具 register 时经 ctx.agent.extensions.get('ui').setMarkdownRenderer 接管 UI 渲染
+//   （UI 作为可插拔组件注册在 agent.extensions 通用能力表的 'ui' 键），把助手正文 / think 正文自动渲染为 HTML；
+//   unregister 时经 resetMarkdownRenderer 还原默认渲染器。核心不硬引用 UI——若 UI 未挂载（headless），
+//   register 静默跳过，不影响工具自身。
 //   （默认渲染器仍由本模块的 renderMarkdown 提供，依赖全局 marked，由 agent.ts 的 ensureExternalLibs 兜底。）
 
 declare const marked: {

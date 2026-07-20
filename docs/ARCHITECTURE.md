@@ -17,7 +17,7 @@
 |---|---|---|
 | **Agent** | 根注册器；系统唯一扩展点与安全边界 | **是（唯一注册器）** |
 | **chat** | 大模型交互循环：压消息入队列、驱动 LLM、产出文本 / tool_call；**内嵌 executor** | **否** |
-| **chat_ui** | UI 编排层：工具开关 UI、渲染输入 / 气泡 / send-stop / 流式；**直接调用 Agent 的 register/unregister** | 否 |
+| **chat_ui（UI）** | UI 编排层（**可插拔组件**）：工具开关 UI、渲染输入 / 气泡 / send-stop / 流式。**已与核心解耦**——核心只写 `agent.output` 输出槽、经 `agent.extensions` 通用能力表发现 UI 能力，绝不 `import` UI；UI 挂载时注册 `'ui'`(渲染)/`'approval'`(确认闸)。核心可无 UI headless 运行（§11）。 | 否 |
 | **tool_manager** | 暴露给 LLM 的统一工具自编排管理 tool（action=register/remove/list）；LLM 经 tool_call 调用它来注册/删除/枚举 tool（包装 `Agent.register`/`unregister`） | 否 |
 | **tool** | 注册单元：声明 `name+author` / `deps`，可选 `call` | 否（被注册对象） |
 | **code** | 一段代码，作为 "run code" tool 的内容被一次性执行 | — |
@@ -181,3 +181,35 @@ UI ──enqueue(user)──▶ [ chat 消息队列 ] ──▶ 主线程 loop (
 - 记忆 / 反思 / 规划均登记为普通 tool，核心保持 `chat` + `chat_ui` + 注册器。
 - 多 Agent 仅在确需时预留接口（层级式 Orchestrator），不做过度设计。
 - `tool_manager` 让 LLM 具备自扩展能力（注册/删除/枚举 tool），是内核极少却可生长的关键支点。
+
+## 11. UI 解耦（核心可无 UI 运行）
+
+UI 不是核心的一部分，而是一个**可插拔组件**（概念上的 tool / adapter）。核心（agent / executor / llm / storage）**不得 `import` UI 模块**，可在无 DOM、无 UI 的 headless 环境下运行——这是架构铁律，任何新能力接入 UI 都不得让核心回退为直连 UI。
+
+### 11.1 三个解耦点
+
+1. **输出槽 `agent.output`（核心契约）**
+   - 核心定义 `OutputSink` 接口（`append` / `updateLast` / `finalizeLast` / `setToolHTML` / `setRunning`），并提供 **headless 默认空实现**。
+   - 引擎、`sendMessage`、`handleToolCommand` **只写 `agent.output`**，绝不直连 `ui.chat`。
+   - UI 挂载时把 `agent.output` 替换为 DOM 实现（`ui.chat`）；卸载即回退 headless 空实现。
+
+2. **通用能力注册表 `agent.extensions`（`Map<string, unknown>`）**
+   - 核心不硬引用 UI 的形状。UI 挂载时注册两项能力：
+     - `'ui'` → `ui.chat`：渲染型工具（如 marked）经 `agent.extensions.get('ui').setMarkdownRenderer(...)` 接管助手消息 / 思考渲染；核心不依赖某工具。
+     - `'approval'` → `ui.requestApproval`：人类确认闸（HITL）。
+   - 工具 / 核心经 `agent.extensions` **发现**能力，而非 `import` 或硬编码 `agent.ui`。
+
+3. **审批闸 `requestApproval`（executor 核心函数）**
+   - `executor.ts` 不再 `import { ui }`；改为导出核心 `requestApproval`（`withHooks`，可被 `orchestrate` 钩子接管），内部经 `ctx.agent.extensions.get('approval')` 委托给 UI；**headless 未挂载则自动放行**并记录。
+
+### 11.2 headless 行为对照
+
+| 能力 | UI 挂载时 | headless（UI 未挂载） |
+|---|---|---|
+| 输出 | `ui.chat` DOM 渲染 | 空实现（无副作用，引擎照常跑 LLM / 工具） |
+| 渲染接管（marked 等） | `setMarkdownRenderer` 生效 | 工具 `register` 静默跳过（不崩） |
+| 确认闸 | UI 弹确认气泡 | 自动放行（自动化场景） |
+
+### 11.3 目标终点
+
+UI 彻底成为 `tool_manager` 可实例化的 tool：以 `register`/`unregister` 钩子挂载 / 卸载 DOM（开启即挂载、关闭即卸载），核心完全 headless 可独立运行于 CLI / 服务场景。当前 UI 经 `mount()` 单一接入点挂载，已满足"核心不依赖 UI"的强约束；后续可把 `mount()` 改为经 `tool_manager register` 触发，使 UI 与其他 tool 同等地位。

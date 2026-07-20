@@ -22,13 +22,28 @@ function toToolCall(t: ToolCallLite): ToolCall {
   return { id: t.id, name: t.function.name, args };
 }
 
+// 输出槽（核心契约）：引擎只写这个槽，绝不直连 UI 模块。默认 headless 空实现——
+// 核心可在无 DOM / 无 UI 环境运行；UI 挂载时把 agent.output 替换为 DOM 实现（ui.chat）。
+interface OutputSink {
+  append(role: string, text: string): void;
+  updateLast(role: string, text: string, reasoning?: string): void;
+  finalizeLast(role: string, text: string, reasoning?: string): void;
+  setToolHTML(html: string): void;
+  setRunning(running: boolean, onStop?: () => void): void;
+}
+const headlessSink: OutputSink = {
+  append() {}, updateLast() {}, finalizeLast() {}, setToolHTML() {}, setRunning() {},
+};
+
 export const agent = {
   messages: [] as ChatMessage[], // 已提交给 LLM 的全量上下文
   messageQueue: [] as ChatMessage[], // 待提交的用户/推理轮
   toolCallQueue: [] as ToolCall[], // 待执行的工具调用
   sessionId: '', // 当前会话 id（由 session 工具的 onRegister 生成）
   storage, // 逻辑存储层（命名空间分区），供运行时 / LLM 动态读写与编辑
-  llm, executor, ui, // 暴露给 LLM 做自编排：动态注册工具 / 直接推理 / 工具可经 ui.chat 接管渲染
+  llm, executor, // 暴露给 LLM 做自编排：动态注册工具 / 直接推理
+  output: headlessSink, // 输出槽（核心契约）：引擎只写这里，不直连 UI；默认 headless 空实现，UI 挂载时替换为 DOM 实现
+  extensions: new Map<string, unknown>(), // 通用能力注册表：UI 挂载时注册 'ui'/'approval'，工具与核心经此发现能力，不硬引用 UI 形状
   tools: new Map<string, ToolDef>(), // 按名挂载的权威表（文档 §5.2）
   _engineActive: false, // 引擎是否在跑（防止并发起多个引擎）
 
@@ -51,7 +66,7 @@ export const agent = {
           const calls = agent.toolCallQueue.splice(0);
           for (const call of calls) {
             // 进度指示：执行前先亮"执行中"，避免聊天区在耗时/确认工具期间空白
-            ui.chat.append('tool', `⚙ ${call.name}: 执行中…`);
+            agent.output.append('tool', `⚙ ${call.name}: 执行中…`);
             const obs = await executor.run(call, agent);
             agent.messages.push({
               role: 'tool',
@@ -59,7 +74,7 @@ export const agent = {
               tool_call_id: call.id,
               name: call.name,
             } as ChatMessage);
-            ui.chat.updateLast('tool', `⚙ ${call.name}: ${obs}`);
+            agent.output.updateLast('tool', `⚙ ${call.name}: ${obs}`);
           }
           // 工具跑完 → 压"继续推理"哨兵到队首
           agent.messageQueue.unshift(SENTINEL);
@@ -75,7 +90,7 @@ export const agent = {
           }
 
           // assistant 占位气泡：流式逐字更新依赖 lastAssistantEl，必须先建
-          ui.chat.append('assistant', '');
+          agent.output.append('assistant', '');
 
           // 流式累积（文本逐字更新、工具调用按 index 合并）
           let content = '', reasoning = '';
@@ -86,11 +101,11 @@ export const agent = {
           })) {
             if (chunk.delta) {
               content += chunk.delta;
-              ui.chat.updateLast('assistant', content, reasoning);
+              agent.output.updateLast('assistant', content, reasoning);
             }
             if (chunk.reasoning) {
               reasoning += chunk.reasoning;
-              ui.chat.updateLast('assistant', content, reasoning);
+              agent.output.updateLast('assistant', content, reasoning);
             }
             if (chunk.toolCall) {
               const i = chunk.toolCall.index ?? 0;
@@ -100,7 +115,7 @@ export const agent = {
               if (chunk.toolCall.arguments) acc[i].args += chunk.toolCall.arguments;
             }
           }
-          ui.chat.finalizeLast('assistant', content, reasoning || undefined);
+          agent.output.finalizeLast('assistant', content, reasoning || undefined);
 
           const toolCalls: ToolCallLite[] = Object.values(acc).map((t) => ({
             id: t.id,
@@ -123,21 +138,21 @@ export const agent = {
       }
     } finally {
       // 覆盖成功/异常/取消：复位运行态
-      ui.chat.setRunning(false);
+      agent.output.setRunning(false);
     }
   }),
 
   // 发送用户消息：入队 + 若引擎未跑则启动
   sendMessage: withHooks(async function (text: string) {
     agent.messageQueue.push({ role: 'user', content: text } as ChatMessage);
-    ui.chat.append('user', text);
+    agent.output.append('user', text);
     if (!agent._engineActive) {
       agent._engineActive = true;
       try {
         await agent.engine();
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        ui.chat.append('tool', `⚠️ ${msg}`);
+        agent.output.append('tool', `⚠️ ${msg}`);
         // 取消/异常：丢弃待处理轮，避免残留队首被重复提交
         agent.messageQueue = [];
         agent.toolCallQueue = [];
@@ -164,7 +179,7 @@ function orchestrateSystemPrompt(): void {
 agent.sendMessage.beforeExe.push(orchestrateSystemPrompt);
 
 // 运行态钩子：消息处理开始（点击发送那一刻）→ 发送按钮变身停止按钮（用户要求"通过 hook"）
-agent.sendMessage.beforeExe.push(() => ui.chat.setRunning(true, agent.chatStop));
+agent.sendMessage.beforeExe.push(() => agent.output.setRunning(true, agent.chatStop));
 
 // 基本初始化（进工作循环前的一次性 bootstrap，属架构铁律允许的顶层副作用）：
 // ① 旧扁平 config → default:config 迁移；② 种子默认配置（无内容也落盘）；
@@ -291,38 +306,43 @@ function parseToolCommand(text: string): { name: string; args: Record<string, un
 // 执行工具命令（绕过 LLM）：解析 → executor.run → 显示结果
 async function handleToolCommand(text: string): Promise<void> {
   const parsed = parseToolCommand(text);
-  if (!parsed) { ui.chat.append('tool', '⚠️ 无法解析命令'); return; }
+  if (!parsed) { agent.output.append('tool', '⚠️ 无法解析命令'); return; }
   const exists = executor.list(true).some((t) => t.name === parsed.name);
-  if (!exists) { ui.chat.append('tool', `⚠️ 未找到工具：${parsed.name}`); return; }
-  ui.chat.append('tool', `⚙ ${parsed.name}: 执行中…`);
+  if (!exists) { agent.output.append('tool', `⚠️ 未找到工具：${parsed.name}`); return; }
+  agent.output.append('tool', `⚙ ${parsed.name}: 执行中…`);
   const obs = await executor.run(
     { id: 'cmd-' + Date.now().toString(36), name: parsed.name, args: parsed.args },
     agent,
   );
   // marked 工具返回 HTML，直接渲染；其它工具结果用 textContent 显示原始文本
   if (parsed.name === 'marked') {
-    ui.chat.setToolHTML(`⚙ ${parsed.name}: ${String(obs)}`);
+    agent.output.setToolHTML(`⚙ ${parsed.name}: ${String(obs)}`);
   } else {
-    ui.chat.updateLast('tool', `⚙ ${parsed.name}: ${obs}`);
+    agent.output.updateLast('tool', `⚙ ${parsed.name}: ${obs}`);
   }
 }
 
 // 配置不完整时的提示文案
 const CONFIG_HINT = '⚠️ 未配置 API Key。请先设置：\n输入 /gm_storage /action set /ns default /key config /update true /value {"apiKey":"你的Key","baseURL":"https://openrouter.ai/api/v1","model":"openrouter/free"}';
 
-// 挂载 UI（用户消息 → agent.sendMessage）
+// 挂载 UI（UI 作为可插拔组件接入核心：设置输出槽 + 注册到通用能力表，供工具与核心发现）。
+// 核心逻辑（引擎 / sendMessage / handleToolCommand）只写 agent.output，绝不直连 ui 模块——
+// 此处是唯一的 UI 接入点（glue），核心因此可在无 UI 环境 headless 运行。
 function mount(): void {
+  agent.output = ui.chat; // UI 接管输出槽（agent.output 默认 headless 空实现）
+  agent.extensions.set('ui', ui.chat); // 渲染型工具（如 marked）经此接管 UI 渲染
+  agent.extensions.set('approval', ui.requestApproval); // 确认闸经此接入（核心 requestApproval 委托）
   ui.chat.mount((text) => {
     // 用户直接调用工具：/tool_name /param value
     if (text.startsWith('/')) {
-      ui.chat.append('user', text);
+      agent.output.append('user', text);
       void handleToolCommand(text);
       return;
     }
     // 配置检查：apiKey 未配置时提示用户通过工具命令设置
     if (!getConfig().apiKey) {
-      ui.chat.append('user', text);
-      ui.chat.append('tool', CONFIG_HINT);
+      agent.output.append('user', text);
+      agent.output.append('tool', CONFIG_HINT);
       return;
     }
     void agent.sendMessage(text);
