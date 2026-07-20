@@ -11,7 +11,7 @@ export interface ExecutorLike {
   registerAll(tools: ToolDef[]): { registered: string[]; rejected: string[] };
   list(includeAll?: boolean): ToolDef[];
   setEnabled(name: string, enabled: boolean): void;
-  allToolStates(): { name: string; author?: string; enabled: boolean; builtin: boolean }[];
+  allToolStates(): { name: string; author?: string; enabled: boolean; builtin: boolean; description?: string }[];
   run(call: ToolCall, agentArg?: AgentLike): Promise<string>;
 }
 
@@ -283,15 +283,15 @@ export const executor = {
   },
 
   // 全量工具状态（含启用态），供 chat_ui 启停面板渲染（文档 §3 三视图）。
-  allToolStates(): { name: string; author?: string; enabled: boolean; builtin: boolean }[] {
+  allToolStates(): { name: string; author?: string; enabled: boolean; builtin: boolean; description?: string }[] {
     const registered = new Set(registry.keys());
-    const states: { name: string; author?: string; enabled: boolean; builtin: boolean }[] = [];
+    const states: { name: string; author?: string; enabled: boolean; builtin: boolean; description?: string }[] = [];
     for (const t of defaultTools) {
-      states.push({ name: t.name, author: t.author, enabled: registered.has(t.name), builtin: true });
+      states.push({ name: t.name, author: t.author, enabled: registered.has(t.name), builtin: true, description: t.description });
     }
     for (const desc of storage.listToolDefs()) {
       if (states.some((s) => s.name === desc.name)) continue;
-      states.push({ name: desc.name, author: desc.author, enabled: desc.enabled !== false, builtin: false });
+      states.push({ name: desc.name, author: desc.author, enabled: desc.enabled !== false, builtin: false, description: desc.description });
     }
     return states;
   },
@@ -405,6 +405,53 @@ const storageSetTool: ToolDef = {
     }
     ctx.storage.set(ns, key, args.value);
     return `已保存 ${ns}:${key}`;
+  },
+};
+
+// 3) 列出存储键：给定 ns 列该分区子键；不给 ns 列全部分区概览（便于定位要读/删的键）
+const storageListTool: ToolDef = {
+  name: 'storage_list',
+  author: 'core',
+  description: '列出持久存储中的键。给定 ns 时列出该命名空间全部子键；不给 ns 时按命名空间分组列出全部分区概览（default/config/sessions/tools/code/memory）。用于查看有哪些数据、定位要读取或删除的键。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      ns: { type: 'string', description: '可选命名空间；默认列出全部分区概览' },
+    },
+  },
+  call: (args) => {
+    const ns = args.ns ? String(args.ns) : '';
+    if (ns) {
+      const keys = storage.keys(ns);
+      return JSON.stringify({ ns, count: keys.length, keys });
+    }
+    const NS = ['default', 'config', 'sessions', 'tools', 'code', 'memory'];
+    const overview: Record<string, string[]> = {};
+    for (const n of NS) overview[n] = storage.keys(n);
+    return JSON.stringify(overview);
+  },
+};
+
+// 3b) 删除存储键：破坏性，riskLevel=high 触发确认闸
+const storageDelTool: ToolDef = {
+  name: 'storage_del',
+  author: 'core',
+  riskLevel: 'high',
+  description: '删除持久存储中的一个键（不可恢复，执行前会请求确认）。用于清理无用数据或重置某项。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      key: { type: 'string', description: '要删除的键名' },
+      ns: { type: 'string', description: '可选命名空间，默认 memory' },
+    },
+    required: ['key'],
+  },
+  call: (args, ctx) => {
+    const key = String(args.key ?? '');
+    if (!key) return '参数 key 缺失';
+    const ns = String(args.ns ?? 'memory');
+    ctx.storage.del(ns, key);
+    return `已删除 ${ns}:${key}`;
   },
 };
 
@@ -609,8 +656,10 @@ const sessionTool: ToolDef = {
 // 默认工具清单（统一能力面）：领域工具 + 自开发工具 + 系统编排原语。
 // 全部由 agent.init() 注册；orchestrate_send 无 call（不进 LLM 日常载荷，但 tool_list 可见）。
 export const defaultTools: ToolDef[] = [
+  storageListTool,
   storageGetTool,
   storageSetTool,
+  storageDelTool,
   codeRunTool,
   toolRegisterTool,
   toolRemoveTool,
