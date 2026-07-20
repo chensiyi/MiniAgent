@@ -248,8 +248,9 @@ export const executor = {
   },
 
   // 列举：默认只返回有 call 的工具（进 LLM tool_call 清单，§7）；includeAll=true 返回全量（tool_list / 系统提示用）。
+  // 统一按 name 字母序排序，保证 tool_list / LLM 载荷 / 任何枚举出口的可读性与确定性一致。
   list(includeAll = false): ToolDef[] {
-    const all = [...registry.values()];
+    const all = [...registry.values()].sort((a, b) => a.name.localeCompare(b.name));
     return includeAll ? all : all.filter((t) => typeof t.call === 'function');
   },
 
@@ -282,7 +283,7 @@ export const executor = {
     }
   },
 
-  // 全量工具状态（含启用态），供 chat_ui 启停面板渲染（文档 §3 三视图）。
+  // 全量工具状态（含启用态），供 chat_ui 启停面板渲染（文档 §3 三视图）。按 name 字母序排序。
   allToolStates(): { name: string; author?: string; enabled: boolean; builtin: boolean; description?: string }[] {
     const registered = new Set(registry.keys());
     const states: { name: string; author?: string; enabled: boolean; builtin: boolean; description?: string }[] = [];
@@ -293,7 +294,7 @@ export const executor = {
       if (states.some((s) => s.name === desc.name)) continue;
       states.push({ name: desc.name, author: desc.author, enabled: desc.enabled !== false, builtin: false, description: desc.description });
     }
-    return states;
+    return states.sort((a, b) => a.name.localeCompare(b.name));
   },
 
   // 执行一个工具调用，返回"观察结果"文本，回灌给 LLM 作为 tool 消息。
@@ -422,12 +423,12 @@ const storageListTool: ToolDef = {
   call: (args) => {
     const ns = args.ns ? String(args.ns) : '';
     if (ns) {
-      const keys = storage.keys(ns);
+      const keys = storage.keys(ns).sort((a, b) => a.localeCompare(b));
       return JSON.stringify({ ns, count: keys.length, keys });
     }
     const NS = ['default', 'config', 'sessions', 'tools', 'code', 'memory'];
     const overview: Record<string, string[]> = {};
-    for (const n of NS) overview[n] = storage.keys(n);
+    for (const n of NS) overview[n] = storage.keys(n).sort((a, b) => a.localeCompare(b));
     return JSON.stringify(overview);
   },
 };
