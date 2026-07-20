@@ -21,7 +21,12 @@ const STYLE = `
 .ma-bubble{padding:8px 12px;max-width:300px;white-space:pre-wrap;word-break:break-word;border-radius:12px;border:1px solid rgba(255,255,255,.6);background:rgba(255,255,255,.5);backdrop-filter:blur(10px)}
 .ma-bubble.assistant{background:rgba(214,234,255,.55)}
 .ma-bubble.tool{font-size:12px;background:rgba(255,243,224,.65)}
-.ma-input-row{display:flex;gap:6px;align-items:center}
+.ma-input-row{display:flex;gap:6px;align-items:center;position:relative}
+.ma-ac{position:absolute;left:0;right:0;bottom:100%;margin-bottom:4px;background:rgba(255,255,255,.94);backdrop-filter:blur(10px);border:1px solid rgba(0,0,0,.12);border-radius:8px;overflow:auto;max-height:210px;box-shadow:0 4px 16px rgba(0,0,0,.12)}
+.ma-ac-item{padding:6px 10px;cursor:pointer;display:flex;flex-direction:column;gap:1px}
+.ma-ac-item.active,.ma-ac-item:hover{background:rgba(22,119,255,.12)}
+.ma-ac-name{font-weight:600;color:#1677ff;font-size:12px}
+.ma-ac-hint{color:#888;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ma-input{flex:1;min-width:0;padding:8px 10px;border:1px solid rgba(0,0,0,.15);border-radius:8px;outline:0;background:rgba(255,255,255,.7);backdrop-filter:blur(10px)}
 .ma-input-row button{padding:8px 14px;border:0;border-radius:8px;background:#1677ff;color:#fff;cursor:pointer;white-space:nowrap}
 .ma-input-row button.stop{background:#ff4d4f}
@@ -34,7 +39,8 @@ const STYLE = `
 .ma-tools{padding:8px 10px;border:0;border-radius:8px;background:rgba(255,255,255,.7);backdrop-filter:blur(10px);cursor:pointer}
 .ma-tools-panel{padding:8px;border:1px solid rgba(255,255,255,.6);border-radius:10px;background:rgba(255,255,255,.5);backdrop-filter:blur(10px);display:flex;flex-direction:column;gap:4px;max-height:40vh;overflow:auto}
 .ma-tool-row{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px}
-.ma-tool-name{word-break:break-all}
+.ma-tool-name{word-break:break-all;flex-shrink:0}
+.ma-tool-desc{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;color:#888;font-size:11px}
 .ma-think{margin:0 0 6px;border-left:3px solid #1677ff;border-radius:0 6px 6px 0;overflow:hidden}
 .ma-think summary{cursor:pointer;padding:4px 8px;font-size:12px;color:#555;background:rgba(22,119,255,.08);user-select:none}
 .ma-think summary:hover{background:rgba(22,119,255,.14)}
@@ -56,14 +62,92 @@ function renderToolsPanel(panel: HTMLElement): void {
     const row = document.createElement('label'); row.className = 'ma-tool-row';
     const name = document.createElement('span'); name.className = 'ma-tool-name';
     name.textContent = s.author && s.author !== 'core' ? `${s.name} @${s.author}` : s.name;
+    const desc = document.createElement('span'); desc.className = 'ma-tool-desc';
+    desc.textContent = s.description ?? '';
+    desc.title = s.description ?? ''; // 鼠标悬停看全文
     const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = s.enabled;
     cb.onchange = () => executor.setEnabled(s.name, cb.checked);
-    row.append(name, cb); panel.append(row);
+    row.append(name, desc, cb); panel.append(row);
   }
 }
 
 let root: HTMLElement, bubbles: HTMLElement, input: HTMLInputElement, sendBtn: HTMLButtonElement, stopBtn: HTMLButtonElement;
 let lastAssistantEl: HTMLElement | null = null, lastToolEl: HTMLElement | null = null;
+let acEl: HTMLElement | null = null;
+let acItems: { text: string; hint: string }[] = [];
+let acIndex = -1;
+
+// 手动工具命令自动补全：/tool 补工具名，/tool /param 补参数（显示 inputSchema.properties[param].description）
+function computeAc(text: string): { text: string; hint: string }[] {
+  if (!text.startsWith('/')) return [];
+  const lastSpace = text.lastIndexOf(' ');
+  const after = text.slice(lastSpace + 1);
+  const hasPrefix = lastSpace > 0;
+  const propsOf = (name: string): Record<string, { description?: string; type?: string }> =>
+    (executor.list(true).find((t) => t.name === name)?.inputSchema?.properties ?? {}) as Record<string, { description?: string; type?: string }>;
+  const usedParams = (toolName: string, activeQ: string): Set<string> => {
+    const used = new Set<string>(); const re = /\/(\S+)/g; let m: RegExpExecArray | null;
+    while ((m = re.exec(text))) { const w = m[1]; if (w === toolName || w === activeQ) continue; used.add(w); }
+    return used;
+  };
+  const paramItems = (toolName: string, q: string): { text: string; hint: string }[] => {
+    const props = propsOf(toolName);
+    return Object.entries(props)
+      .filter(([k]) => !usedParams(toolName, q).has(k) && k.toLowerCase().includes(q))
+      .slice(0, 8)
+      .map(([k, v]) => ({ text: '/' + k + ' ', hint: (v.description ?? '') + (v.type ? ` (${v.type})` : '') }));
+  };
+  if (after.startsWith('/')) {
+    const q = after.slice(1).toLowerCase();
+    if (!hasPrefix) {
+      return executor.list(true)
+        .filter((t) => t.name.toLowerCase().includes(q))
+        .slice(0, 8)
+        .map((t) => ({ text: '/' + t.name + ' ', hint: t.description }));
+    }
+    const toolName = text.slice(1, lastSpace).split(/\s+/)[0];
+    return paramItems(toolName, q);
+  }
+  if (after === '' && hasPrefix) {
+    const toolName = text.slice(1, lastSpace).split(/\s+/)[0];
+    return paramItems(toolName, '');
+  }
+  return [];
+}
+
+function renderAc(): void {
+  const el = acEl;
+  if (!el) return;
+  if (!acItems.length) { el.style.display = 'none'; el.replaceChildren(); return; }
+  el.replaceChildren();
+  acItems.forEach((it, i) => {
+    const item = document.createElement('div'); item.className = 'ma-ac-item' + (i === acIndex ? ' active' : '');
+    const name = document.createElement('div'); name.className = 'ma-ac-name'; name.textContent = it.text.trim();
+    const hint = document.createElement('div'); hint.className = 'ma-ac-hint'; hint.textContent = it.hint;
+    item.append(name, hint);
+    item.onmousedown = (e) => { e.preventDefault(); acceptAc(it.text); };
+    item.onmouseenter = () => { acIndex = i; renderAc(); };
+    el.append(item);
+  });
+  el.style.display = '';
+}
+
+function updateAc(): void {
+  if (!acEl || !input) return;
+  acItems = computeAc(input.value);
+  acIndex = acItems.length ? 0 : -1;
+  renderAc();
+}
+
+function acceptAc(insert: string): void {
+  if (!input) return;
+  const text = input.value;
+  const lastSpace = text.lastIndexOf(' ');
+  const before = lastSpace === -1 ? '' : text.slice(0, lastSpace + 1);
+  input.value = before + insert;
+  input.focus();
+  updateAc();
+}
 
 export const ui = {
   chat: {
@@ -89,16 +173,28 @@ export const ui = {
       stopBtn = root.querySelector('.ma-stop') as HTMLButtonElement;
       const toolsBtn = root.querySelector('.ma-tools') as HTMLButtonElement;
       const toolsPanel = root.querySelector('.ma-tools-panel') as HTMLElement;
+      acEl = document.createElement('div'); acEl.className = 'ma-ac'; acEl.style.display = 'none';
+      (root.querySelector('.ma-input-row') as HTMLElement).append(acEl);
       toolsBtn.onclick = () => {
         if (toolsPanel.style.display === 'none') { renderToolsPanel(toolsPanel); toolsPanel.style.display = ''; }
         else toolsPanel.style.display = 'none';
       };
       const doSend = (): void => {
         const text = input.value.trim(); if (!text) return;
-        input.value = ''; onSend(text);
+        input.value = ''; if (acEl) acEl.style.display = 'none'; onSend(text);
       };
       sendBtn.onclick = doSend;
-      input.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); doSend(); } };
+      input.oninput = () => updateAc();
+      input.onblur = () => { if (acEl) acEl.style.display = 'none'; };
+      input.onkeydown = (e) => {
+        if (acEl && acEl.style.display !== 'none' && acItems.length) {
+          if (e.key === 'ArrowDown') { e.preventDefault(); acIndex = (acIndex + 1) % acItems.length; renderAc(); return; }
+          if (e.key === 'ArrowUp') { e.preventDefault(); acIndex = (acIndex - 1 + acItems.length) % acItems.length; renderAc(); return; }
+          if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); if (acIndex >= 0) acceptAc(acItems[acIndex].text); return; }
+          if (e.key === 'Escape') { acEl.style.display = 'none'; return; }
+        }
+        if (e.key === 'Enter') { e.preventDefault(); doSend(); }
+      };
     },
 
     append(role: string, text: string): void {
