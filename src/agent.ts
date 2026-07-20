@@ -240,7 +240,7 @@ async function handleToolCommand(text: string): Promise<void> {
 }
 
 // 配置不完整时的提示文案
-const CONFIG_HINT = '⚠️ 未配置 API Key。请先设置：\n输入 /storage_set /ns default /key config /update true /value {"apiKey":"你的Key","baseURL":"https://openrouter.ai/api/v1","model":"openrouter/free"}';
+const CONFIG_HINT = '⚠️ 未配置 API Key。请先设置：\n输入 /gm_storage /action set /ns default /key config /update true /value {"apiKey":"你的Key","baseURL":"https://openrouter.ai/api/v1","model":"openrouter/free"}';
 
 // 挂载 UI（用户消息 → agent.sendMessage）
 function mount(): void {
