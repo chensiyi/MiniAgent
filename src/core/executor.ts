@@ -247,8 +247,8 @@ export const executor = {
     return { registered, rejected };
   },
 
-  // 列举：默认只返回有 call 的工具（进 LLM tool_call 清单，§7）；includeAll=true 返回全量（tool_list / 系统提示用）。
-  // 统一按 name 字母序排序，保证 tool_list / LLM 载荷 / 任何枚举出口的可读性与确定性一致。
+  // 列举：默认只返回有 call 的工具（进 LLM tool_call 清单，§7）；includeAll=true 返回全量（tool_manager / 系统提示用）。
+  // 统一按 name 字母序排序，保证 tool_manager / LLM 载荷 / 任何枚举出口的可读性与确定性一致。
   list(includeAll = false): ToolDef[] {
     const all = [...registry.values()].sort((a, b) => a.name.localeCompare(b.name));
     return includeAll ? all : all.filter((t) => typeof t.call === 'function');
@@ -354,105 +354,71 @@ function genSessionId(): string {
 // ---- 预置默认工具「定义」：由 agent.init() 统一注册（本模块不写死 register 副作用）----
 // 设计约定：工具清单属于"业务编排"，由顶层 init 一次性注册，保持可插拔 / 可重建。
 
-// 1) 读取存储（默认 memory 命名空间，可指定其它）
-const storageGetTool: ToolDef = {
-  name: 'storage_get',
+// 1) 统一的持久存储管理（整合原 storage_get/set/list/del）
+//    action 区分操作：get=读取 / set=写入 / list=列出 / del=删除。
+//    删除为破坏性操作，仅 del 动作经 ui.requestApproval 确认闸（其余动作无摩擦）。
+const gmStorageTool: ToolDef = {
+  name: 'gm_storage',
   author: 'core',
-  description: '读取持久存储中此前写入的键值（默认 memory 命名空间，可指定其它命名空间）。用于回忆记忆、配置、历史。',
+  description: '统一的持久存储管理（默认 memory 命名空间，可指定其它 ns）。action 取值：get=读取键；set=写入键（update=true 时合并已有对象）；list=列出键（给定 ns 列该分区子键，不给 ns 按 default/config/sessions/tools/code/memory 分区概览）；del=删除键（不可恢复，删除前会请求确认）。用于记忆、配置、状态管理。',
   inputSchema: {
     type: 'object',
     properties: {
-      key: { type: 'string', description: '键名' },
+      action: { type: 'string', enum: ['get', 'set', 'list', 'del'], description: '操作类型' },
+      key: { type: 'string', description: '键名（get/set/del 必需）' },
+      value: { type: 'string', description: '要保存的值（set 必需，建议 JSON 字符串）' },
       ns: { type: 'string', description: '可选命名空间，默认 memory' },
+      update: { type: 'boolean', description: 'set 专用：合并模式，读取已有值并合并对象' },
     },
-    required: ['key'],
+    required: ['action'],
   },
-  call: (args, ctx) => {
-    const key = String(args.key ?? '');
-    if (!key) return '参数 key 缺失';
+  call: async (args, ctx) => {
+    const action = String(args.action ?? '');
     const ns = String(args.ns ?? 'memory');
-    const v = ctx.storage.get(ns, key);
-    return v === undefined ? '(无此键)' : JSON.stringify(v);
-  },
-};
-
-// 2) 写入存储（默认 memory 命名空间，可指定其它；update=true 时合并已有值）
-const storageSetTool: ToolDef = {
-  name: 'storage_set',
-  author: 'core',
-  description: '写入一个键值到持久存储（默认 memory 命名空间）。可用于保存记忆、配置、偏好。update=true 时合并已有对象。',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      key: { type: 'string', description: '键名' },
-      value: { type: 'string', description: '要保存的值（建议 JSON 字符串）' },
-      ns: { type: 'string', description: '可选命名空间，默认 memory' },
-      update: { type: 'boolean', description: '合并模式：读取已有值并合并（对象 merge，其余覆盖）' },
-    },
-    required: ['key', 'value'],
-  },
-  call: (args, ctx) => {
-    const key = String(args.key ?? '');
-    if (!key) return '参数 key 缺失';
-    const ns = String(args.ns ?? 'memory');
-    if (args.update) {
-      const existing = ctx.storage.get(ns, key) ?? {};
-      const incoming = args.value;
-      const merged = typeof existing === 'object' && existing && typeof incoming === 'object' && incoming
-        ? { ...(existing as Record<string, unknown>), ...(incoming as Record<string, unknown>) }
-        : incoming;
-      ctx.storage.set(ns, key, merged);
-      return `已合并保存 ${ns}:${key}`;
+    switch (action) {
+      case 'get': {
+        const key = String(args.key ?? '');
+        if (!key) return '参数 key 缺失';
+        const v = ctx.storage.get(ns, key);
+        return v === undefined ? '(无此键)' : JSON.stringify(v);
+      }
+      case 'set': {
+        const key = String(args.key ?? '');
+        if (!key) return '参数 key 缺失';
+        if (args.value === undefined) return '参数 value 缺失';
+        if (args.update) {
+          const existing = ctx.storage.get(ns, key) ?? {};
+          const incoming = args.value;
+          const merged = typeof existing === 'object' && existing && typeof incoming === 'object' && incoming
+            ? { ...(existing as Record<string, unknown>), ...(incoming as Record<string, unknown>) }
+            : incoming;
+          ctx.storage.set(ns, key, merged);
+          return `已合并保存 ${ns}:${key}`;
+        }
+        ctx.storage.set(ns, key, args.value);
+        return `已保存 ${ns}:${key}`;
+      }
+      case 'list': {
+        if (args.ns) {
+          const keys = storage.keys(ns).sort((a, b) => a.localeCompare(b));
+          return JSON.stringify({ ns, count: keys.length, keys });
+        }
+        const NS = ['default', 'config', 'sessions', 'tools', 'code', 'memory'];
+        const overview: Record<string, string[]> = {};
+        for (const n of NS) overview[n] = storage.keys(n).sort((a, b) => a.localeCompare(b));
+        return JSON.stringify(overview);
+      }
+      case 'del': {
+        const key = String(args.key ?? '');
+        if (!key) return '参数 key 缺失';
+        const ok = await ui.requestApproval({ name: `gm_storage:del ${ns}:${key}`, riskLevel: 'high' });
+        if (!ok) return '用户拒绝了执行';
+        ctx.storage.del(ns, key);
+        return `已删除 ${ns}:${key}`;
+      }
+      default:
+        return `未知 action: ${action}（支持 get/set/list/del）`;
     }
-    ctx.storage.set(ns, key, args.value);
-    return `已保存 ${ns}:${key}`;
-  },
-};
-
-// 3) 列出存储键：给定 ns 列该分区子键；不给 ns 列全部分区概览（便于定位要读/删的键）
-const storageListTool: ToolDef = {
-  name: 'storage_list',
-  author: 'core',
-  description: '列出持久存储中的键。给定 ns 时列出该命名空间全部子键；不给 ns 时按命名空间分组列出全部分区概览（default/config/sessions/tools/code/memory）。用于查看有哪些数据、定位要读取或删除的键。',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      ns: { type: 'string', description: '可选命名空间；默认列出全部分区概览' },
-    },
-  },
-  call: (args) => {
-    const ns = args.ns ? String(args.ns) : '';
-    if (ns) {
-      const keys = storage.keys(ns).sort((a, b) => a.localeCompare(b));
-      return JSON.stringify({ ns, count: keys.length, keys });
-    }
-    const NS = ['default', 'config', 'sessions', 'tools', 'code', 'memory'];
-    const overview: Record<string, string[]> = {};
-    for (const n of NS) overview[n] = storage.keys(n).sort((a, b) => a.localeCompare(b));
-    return JSON.stringify(overview);
-  },
-};
-
-// 3b) 删除存储键：破坏性，riskLevel=high 触发确认闸
-const storageDelTool: ToolDef = {
-  name: 'storage_del',
-  author: 'core',
-  riskLevel: 'high',
-  description: '删除持久存储中的一个键（不可恢复，执行前会请求确认）。用于清理无用数据或重置某项。',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      key: { type: 'string', description: '要删除的键名' },
-      ns: { type: 'string', description: '可选命名空间，默认 memory' },
-    },
-    required: ['key'],
-  },
-  call: (args, ctx) => {
-    const key = String(args.key ?? '');
-    if (!key) return '参数 key 缺失';
-    const ns = String(args.ns ?? 'memory');
-    ctx.storage.del(ns, key);
-    return `已删除 ${ns}:${key}`;
   },
 };
 
@@ -481,72 +447,82 @@ const codeRunTool: ToolDef = {
   },
 };
 
-// 5) 注册自编排工具（持久化 + 注册 → register 重建）；对齐文档 tool_register 语义
-const toolRegisterTool: ToolDef = {
-  name: 'tool_register',
+// 5) 统一的工具自编排管理（整合原 tool_register/tool_remove/tool_list）
+//    action 区分操作：register=注册/创建 / remove=删除 / list=枚举。
+const toolManagerTool: ToolDef = {
+  name: 'tool_manager',
   author: 'core',
-  description:
-    '注册一个新工具（自编排）：持久化到 tools 命名空间（系统真相源），重载后按依赖拓扑自动重建。code 为 call 源码；register 可选为安装源码。',
+  description: '统一的工具自编排管理。action 取值：register=注册/创建新工具（持久化到 tools 命名空间，重载按依赖拓扑自动重建；code 为 call 源码，register 可选为安装源码）；remove=删除一个自编排工具（移除持久化并注销）；list=枚举当前所有已注册工具（含无 call 的系统原语），供查看完整能力面。',
   inputSchema: {
     type: 'object',
     properties: {
-      name: { type: 'string', description: '工具名（唯一，与 author 组合）' },
+      action: { type: 'string', enum: ['register', 'remove', 'list'], description: '操作类型' },
+      name: { type: 'string', description: '工具名（register/remove 必需；与 author 组合唯一）' },
       author: { type: 'string', description: '可选作者，默认 core' },
-      description: { type: 'string', description: '工具说明' },
-      inputSchema: { type: 'object', description: 'JSON Schema 参数声明' },
+      description: { type: 'string', description: '工具说明（register 必需）' },
+      inputSchema: { type: 'object', description: 'JSON Schema 参数声明（register 必需）' },
       deps: { type: 'array', description: '可选前置依赖 [{name, author?, version?}]' },
       riskLevel: { type: 'string', enum: ['low', 'medium', 'high', 'critical'], description: '可选风险级别' },
-      code: { type: 'string', description: 'call 源码：(args, ctx) => string' },
-      register: { type: 'string', description: '可选：安装/重建源码 (ctx) => void' },
+      code: { type: 'string', description: 'call 源码：(args, ctx) => string（register 必需）' },
+      register: { type: 'string', description: '可选：安装/重建源码 (ctx) => void（register 用）' },
     },
-    required: ['name', 'description', 'inputSchema', 'code'],
+    required: ['action'],
   },
   call: (args, ctx) => {
-    const name = String(args.name ?? '');
-    if (!name) return '参数 name 缺失';
-    const desc: ToolDesc = {
-      name,
-      author: args.author ? String(args.author) : 'core',
-      description: String(args.description ?? ''),
-      inputSchema: (args.inputSchema as Record<string, unknown>) ?? { type: 'object', properties: {} },
-      deps: (args.deps as DepRef[]) ?? undefined,
-      riskLevel: (args.riskLevel as ToolDesc['riskLevel']) ?? undefined,
-      code: String(args.code ?? ''),
-      register: args.register ? String(args.register) : undefined,
-      enabled: true,
-    };
-    let tool: ToolDef;
-    try {
-      tool = buildToolFromDesc(desc);
-    } catch (e) {
-      return `工具代码编译失败: ${e instanceof Error ? e.message : String(e)}`;
+    const action = String(args.action ?? '');
+    switch (action) {
+      case 'register': {
+        const name = String(args.name ?? '');
+        if (!name) return '参数 name 缺失';
+        const desc: ToolDesc = {
+          name,
+          author: args.author ? String(args.author) : 'core',
+          description: String(args.description ?? ''),
+          inputSchema: (args.inputSchema as Record<string, unknown>) ?? { type: 'object', properties: {} },
+          deps: (args.deps as DepRef[]) ?? undefined,
+          riskLevel: (args.riskLevel as ToolDesc['riskLevel']) ?? undefined,
+          code: String(args.code ?? ''),
+          register: args.register ? String(args.register) : undefined,
+          enabled: true,
+        };
+        let tool: ToolDef;
+        try {
+          tool = buildToolFromDesc(desc);
+        } catch (e) {
+          return `工具代码编译失败: ${e instanceof Error ? e.message : String(e)}`;
+        }
+        ctx.storage.set('tools', name, desc); // 持久化（真相源）
+        const ok = ctx.executor.register(tool); // 注册（含依赖校验）
+        return ok ? `已创建工具 ${name}（已持久化 + 注册）` : `工具 ${name} 注册被拒（依赖缺失或 author 冲突）`;
+      }
+      case 'remove': {
+        const name = String(args.name ?? '');
+        if (!name) return '参数 name 缺失';
+        ctx.storage.del('tools', name);
+        ctx.executor.unregister(name);
+        return `已移除工具 ${name}`;
+      }
+      case 'list': {
+        const all = ctx.executor.list(true);
+        return JSON.stringify(
+          all.map((t) => ({
+            name: t.name,
+            author: t.author ?? 'core',
+            description: t.description,
+            deps: t.deps ?? [],
+            riskLevel: t.riskLevel ?? 'low',
+            call: typeof t.call === 'function',
+            register: typeof t.register === 'function',
+          })),
+        );
+      }
+      default:
+        return `未知 action: ${action}（支持 register/remove/list）`;
     }
-    ctx.storage.set('tools', name, desc); // 持久化（真相源）
-    const ok = ctx.executor.register(tool); // 注册（含依赖校验）
-    return ok ? `已创建工具 ${name}（已持久化 + 注册）` : `工具 ${name} 注册被拒（依赖缺失或 author 冲突）`;
   },
 };
 
-// 6) 删除自编排工具（移除持久化 + 注销 → unregister 还原编排）
-const toolRemoveTool: ToolDef = {
-  name: 'tool_remove',
-  author: 'core',
-  description: '删除一个自编排工具：从 tools 命名空间移除并注销（触发其 unregister 还原编排）。',
-  inputSchema: {
-    type: 'object',
-    properties: { name: { type: 'string', description: '要删除的工具名' } },
-    required: ['name'],
-  },
-  call: (args, ctx) => {
-    const name = String(args.name ?? '');
-    if (!name) return '参数 name 缺失';
-    ctx.storage.del('tools', name);
-    ctx.executor.unregister(name);
-    return `已移除工具 ${name}`;
-  },
-};
-
-// 7) 系统编排发送原语（无 call → 不进 LLM tool_call 清单，文档 §7；仍注册挂载，供 tool_list 揭示完整能力面）
+// 6) 系统编排发送原语（无 call → 不进 LLM tool_call 清单，文档 §7；仍注册挂载，供 tool_manager 揭示完整能力面）
 const orchestrateSendTool: ToolDef = {
   name: 'orchestrate_send',
   author: 'core',
@@ -563,50 +539,46 @@ const orchestrateSendTool: ToolDef = {
   },
 };
 
-// 8) 枚举全量工具（含无 call 的系统原语）供自组织研究
-const toolListTool: ToolDef = {
-  name: 'tool_list',
-  author: 'core',
-  description: '枚举当前所有已注册工具（含无 call 的系统原语），供研究自我组织时查看完整能力面。',
-  inputSchema: { type: 'object', properties: {} },
-  call: (_args, ctx) => {
-    const all = ctx.executor.list(true);
-    return JSON.stringify(
-      all.map((t) => ({
-        name: t.name,
-        author: t.author ?? 'core',
-        description: t.description,
-        deps: t.deps ?? [],
-        riskLevel: t.riskLevel ?? 'low',
-        call: typeof t.call === 'function',
-        register: typeof t.register === 'function',
-      })),
-    );
-  },
-};
-
-// 9) 会话管理：注册后自动把对话消息与工具调用落盘到 session 命名空间（session:<id>）
+// 9) 会话管理：注册后自动把对话消息落盘到 session 命名空间（session:<id>），并在 default:sessions 建索引。
 //    register = 安装/重建入口：生成 sessionId、向 agent.sendMessage 挂载 afterExe 钩子。
 //    注意【惰性创建】：注册时不再立即写空记录，而是首次真实对话（afterExe 触发）才创建
 //    session:<id> 记录并写入 default:sessions 索引——避免每次页面刷新都产生空会话污染存储。
 //    幂等：避免重复注册累积 afterExe 钩子；unregister 时移除该钩子（防泄漏）。
-//    切换会话 / 会话重建留待后续（用户明确"再说"）。
+//    支持 action：info / save / list / create / switch / remove（详见 inputSchema）。
 //    模块级状态：钩子引用 + 当前 sessionId（重注册时更新，避免 stale-id 持续写盘）。
 let sessionPersistHook: (() => void) | null = null;
 let currentSessionId = '';
+
+// 把当前 running 会话的消息落盘（惰性建记录 + 写索引）。register 钩子与 call 多处复用。
+function flushSession(agent: AgentLike, st: typeof storage): void {
+  const id = currentSessionId;
+  if (!id) return;
+  const cur = st.get('session', id);
+  if (!cur) {
+    const idx = st.get<string[]>('default', 'sessions') ?? [];
+    if (!idx.includes(id)) { idx.push(id); st.set('default', 'sessions', idx); }
+    st.set('session', id, { id, createdAt: Date.now(), messages: [...agent.messages] });
+  } else {
+    st.set('session', id, { ...cur, messages: [...agent.messages] });
+  }
+}
+
 const sessionTool: ToolDef = {
   name: 'session',
   author: 'core',
   description:
-    '会话管理：注册后自动把对话消息与工具调用落盘到 session 命名空间（session:<id>），并在 default:sessions 建索引。可查询当前会话信息。切换会话与重建留待后续。',
+    '会话管理：注册后自动把对话消息落盘到 session 命名空间（session:<id>），并在 default:sessions 建索引。' +
+    'action：info=查看当前会话(默认)；save=立即落盘；list=列出全部会话；create=开新会话并清空上下文；' +
+    'switch=切换到指定会话(id必填)；remove=删除指定会话(id必填，删当前则自动开新会话)。',
   inputSchema: {
     type: 'object',
     properties: {
       action: {
         type: 'string',
-        enum: ['info', 'save'],
-        description: 'info=查看当前会话信息（默认）；save=立即落盘一次',
+        enum: ['info', 'save', 'list', 'create', 'switch', 'remove'],
+        description: 'info=当前会话信息(默认); save=立即落盘; list=列出全部会话; create=开新会话; switch=切换会话(id必填); remove=删除会话(id必填)',
       },
+      id: { type: 'string', description: 'switch / remove 的目标会话 id' },
     },
   },
   register: (ctx) => {
@@ -642,35 +614,86 @@ const sessionTool: ToolDef = {
     }
   },
   call: (args, ctx) => {
+    const action = String(args.action ?? 'info');
+
+    // list：列出全部会话（标注 current）
+    if (action === 'list') {
+      const idx = ctx.storage.get<string[]>('default', 'sessions') ?? [];
+      const list = idx.map((sid) => {
+        const rec = ctx.storage.get<{ createdAt?: number; messages?: unknown[] }>('session', sid);
+        return { id: sid, current: sid === currentSessionId, createdAt: rec?.createdAt ?? null, messageCount: rec?.messages?.length ?? 0 };
+      });
+      return JSON.stringify(list);
+    }
+
+    // create：先保存当前会话，再开新会话并清空上下文
+    if (action === 'create') {
+      flushSession(ctx.agent, ctx.storage);
+      const newId = genSessionId();
+      currentSessionId = newId;
+      ctx.agent.sessionId = newId;
+      ctx.agent.messages = [];
+      const idx = ctx.storage.get<string[]>('default', 'sessions') ?? [];
+      if (!idx.includes(newId)) { idx.push(newId); ctx.storage.set('default', 'sessions', idx); }
+      ctx.storage.set('session', newId, { id: newId, createdAt: Date.now(), messages: [] });
+      return `已创建新会话 ${newId}（上下文已清空，旧会话已保存）`;
+    }
+
+    // switch：先保存当前，再加载目标会话消息到运行上下文
+    if (action === 'switch') {
+      const target = String(args.id ?? '');
+      if (!target) return '参数 id 缺失（要切换到的会话 id）';
+      const rec = ctx.storage.get<{ messages?: unknown[] }>('session', target);
+      if (!rec) return `会话不存在: ${target}`;
+      flushSession(ctx.agent, ctx.storage);
+      currentSessionId = target;
+      ctx.agent.sessionId = target;
+      ctx.agent.messages = (rec.messages ?? []) as any[];
+      return `已切换到会话 ${target}（${rec.messages?.length ?? 0} 条消息）`;
+    }
+
+    // remove：删除目标会话；若删的是当前会话则自动开新会话
+    if (action === 'remove') {
+      const target = String(args.id ?? '');
+      if (!target) return '参数 id 缺失（要删除的会话 id）';
+      const rec = ctx.storage.get('session', target);
+      if (!rec) return `会话不存在: ${target}`;
+      ctx.storage.del('session', target);
+      const idx = ctx.storage.get<string[]>('default', 'sessions') ?? [];
+      const ni = idx.filter((x) => x !== target);
+      if (ni.length !== idx.length) ctx.storage.set('default', 'sessions', ni);
+      if (target === currentSessionId) {
+        const newId = genSessionId();
+        currentSessionId = newId;
+        ctx.agent.sessionId = newId;
+        ctx.agent.messages = [];
+        const ni2 = ctx.storage.get<string[]>('default', 'sessions') ?? [];
+        if (!ni2.includes(newId)) { ni2.push(newId); ctx.storage.set('default', 'sessions', ni2); }
+        ctx.storage.set('session', newId, { id: newId, createdAt: Date.now(), messages: [] });
+        return `已删除当前会话 ${target}，并开启新会话 ${newId}`;
+      }
+      return `已删除会话 ${target}`;
+    }
+
+    // info / save 需要当前会话
     const id = ctx.agent.sessionId;
     if (!id) return '会话未初始化';
-    const action = String(args.action ?? 'info');
     if (action === 'save') {
-      const cur = ctx.storage.get('session', id);
-      if (!cur) {
-        // 惰性创建并写入会话索引（与 persist 钩子一致）
-        const idx = ctx.storage.get<string[]>('default', 'sessions') ?? [];
-        if (!idx.includes(id)) { idx.push(id); ctx.storage.set('default', 'sessions', idx); }
-      }
-      ctx.storage.set('session', id, { ...(cur ?? { id, createdAt: Date.now() }), messages: [...ctx.agent.messages] });
+      flushSession(ctx.agent, ctx.storage);
       return `已落盘会话 ${id}（${ctx.agent.messages.length} 条消息）`;
     }
+    // 默认 info
     const stored = ctx.storage.get('session', id);
     return JSON.stringify({ id, messageCount: ctx.agent.messages.length, persisted: !!stored });
   },
 };
 
 // 默认工具清单（统一能力面）：领域工具 + 自开发工具 + 系统编排原语。
-// 全部由 agent.init() 注册；orchestrate_send 无 call（不进 LLM 日常载荷，但 tool_list 可见）。
+// 全部由 agent.init() 注册；orchestrate_send 无 call（不进 LLM 日常载荷，但 tool_manager 可见）。
 export const defaultTools: ToolDef[] = [
-  storageListTool,
-  storageGetTool,
-  storageSetTool,
-  storageDelTool,
+  gmStorageTool,
   codeRunTool,
-  toolRegisterTool,
-  toolRemoveTool,
+  toolManagerTool,
   orchestrateSendTool,
-  toolListTool,
   sessionTool,
 ];
