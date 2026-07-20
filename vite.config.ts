@@ -30,7 +30,7 @@ const version = `${pkg.version}.${buildStamp}`;
 const updateURL = 'http://localhost:4173/miniagent.user.js';
 
 // MiniAgent 构建配置（极简版）：纯原生 TS + 手写 DOM，无 React / antd / langchain / 任何框架
-// 全部内联进单文件 userscript，零 @require、零 CDN 依赖，任何页面即开即用
+// markdown 渲染交给外部引入的 marked（经 @require 注入为全局变量，不内联进产物），并由 DOMPurify 清洗 XSS
 export default defineConfig({
   plugins: [
     monkey({
@@ -41,6 +41,11 @@ export default defineConfig({
         version,
         description: '极简 userScript 智能体（原生 DOM + GM 桥接 LLM）',
         match: ['*://*/*'], // 注入范围（后续脚本管理可控）
+        // 外部 JS 依赖（@require 注入为全局变量，运行期从 CDN 加载，不打包进产物）
+        require: [
+          'https://cdn.jsdelivr.net/npm/marked@12/marked.min.js',
+          'https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js',
+        ],
         grant: [
           'GM_addStyle', 'GM_setValue', 'GM_getValue', 'GM_deleteValue', 'GM_listValues', 'GM_xmlhttpRequest',
           // 仅 dev 分支授予 unsafeWindow：发布分支不挂页面主世界，保持标准用户脚本空间

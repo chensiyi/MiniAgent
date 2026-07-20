@@ -1,7 +1,7 @@
 import { GM_addStyle } from '$';
 import { withHooks } from '../core/withHooks';
 import { executor } from '../core/executor';
-import { renderMarkdown } from './markdown';
+import { renderMarkdown } from '../../tools/marked';
 
 // Trusted Types 兼容：require-trusted-types-for 'script' 下 innerHTML 必须是 TrustedHTML。
 // 建一次性策略包装 HTML；无 trustedTypes 或建策略失败则回退直接赋值。
@@ -52,9 +52,18 @@ const STYLE = `
 .ma-md-content h1,.ma-md-content h2,.ma-md-content h3{margin:8px 0 4px;line-height:1.3}
 .ma-md-content ul,.ma-md-content ol{margin:4px 0;padding-left:20px}
 .ma-md-content blockquote{margin:4px 0;padding:2px 8px;border-left:3px solid var(--glass-border);color:var(--text-dim)}
-.ma-md-content pre.ma-md-pre{max-height:200px;overflow:auto;margin:6px 0;padding:6px 8px;background:rgba(0,0,0,.3);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;white-space:pre-wrap;word-break:break-all}
-.ma-md-content code{padding:1px 4px;background:rgba(255,255,255,.12);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}
+.ma-md-content pre{max-height:200px;overflow:auto;margin:6px 0;padding:6px 8px;background:rgba(0,0,0,.3);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;white-space:pre-wrap;word-break:break-all}
+.ma-md-content :not(pre) > code{padding:1px 4px;background:rgba(255,255,255,.12);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}
+.ma-md-content img{max-width:100%}
+.ma-md-content table{border-collapse:collapse;margin:6px 0;font-size:12px}
+.ma-md-content th,.ma-md-content td{border:1px solid var(--glass-border);padding:2px 6px}
+.ma-md-content hr{border:0;border-top:1px solid var(--glass-border);margin:8px 0}
 .ma-md-content a{color:#6fb0f0}
+.ma-header{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:3px 8px;border:1px solid var(--glass-border);background:var(--glass);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
+.ma-title{font-size:11px;letter-spacing:.5px;color:var(--text-dim);user-select:none}
+.ma-toggle{padding:1px 7px;border:1px solid var(--glass-border);background:rgba(255,255,255,.08);color:var(--text);cursor:pointer;font-size:13px;line-height:1.4}
+.ma-toggle:hover{background:rgba(255,255,255,.16)}
+.ma-collapsed .ma-bubbles,.ma-collapsed .ma-input-row,.ma-collapsed .ma-tools-panel{display:none}
 `;
 
 // 工具启停面板：读 executor.allToolStates()，每行开关调 setEnabled（即时生效+持久化，§3）
@@ -159,6 +168,7 @@ export const ui = {
       GM_addStyle(STYLE);
       root = document.createElement('div'); root.id = 'miniagent-root';
       setHTML(root, `
+        <div class="ma-header"><span class="ma-title">MiniAgent</span><button class="ma-toggle" type="button" title="折叠/展开面板">▾</button></div>
         <div class="ma-bubbles"></div>
         <div class="ma-input-row">
           <button class="ma-tools" type="button" title="工具开关">⚙</button>
@@ -180,6 +190,13 @@ export const ui = {
       toolsBtn.onclick = () => {
         if (toolsPanel.style.display === 'none') { renderToolsPanel(toolsPanel); toolsPanel.style.display = ''; }
         else toolsPanel.style.display = 'none';
+      };
+      const toggleBtn = root.querySelector('.ma-toggle') as HTMLButtonElement;
+      toggleBtn.onclick = () => {
+        const collapsed = root.classList.toggle('ma-collapsed');
+        toggleBtn.textContent = collapsed ? '▴' : '▾';
+        // 展开时若工具面板此前开着，刷新其开关状态（运行时可能已变化）
+        if (!collapsed && toolsPanel.style.display === '') renderToolsPanel(toolsPanel);
       };
       const doSend = (): void => {
         const text = input.value.trim(); if (!text) return;
