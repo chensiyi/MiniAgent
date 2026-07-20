@@ -18,7 +18,7 @@
 | **Agent** | 根注册器；系统唯一扩展点与安全边界 | **是（唯一注册器）** |
 | **chat** | 大模型交互循环：压消息入队列、驱动 LLM、产出文本 / tool_call；**内嵌 executor** | **否** |
 | **chat_ui** | UI 编排层：工具开关 UI、渲染输入 / 气泡 / send-stop / 流式；**直接调用 Agent 的 register/unregister** | 否 |
-| **tool_register** | 暴露给 LLM 的"注册工具"tool；LLM 经 tool_call 调用它来注册新 tool（包装 `Agent.register`） | 否 |
+| **tool_manager** | 暴露给 LLM 的统一工具自编排管理 tool（action=register/remove/list）；LLM 经 tool_call 调用它来注册/删除/枚举 tool（包装 `Agent.register`/`unregister`） | 否 |
 | **tool** | 注册单元：声明 `name+author` / `deps`，可选 `call` | 否（被注册对象） |
 | **code** | 一段代码，作为 "run code" tool 的内容被一次性执行 | — |
 | **run code** | 一个 tool（有 `call`），提供一次性代码执行能力 | 否 |
@@ -26,7 +26,7 @@
 
 ### 2.2 关键澄清
 
-- **`chat` 不是注册器**。它是"让大模型通过 tool_call 调用 `tool_register`"的过程——链路是 `LLM → tool_register → Agent.register`。
+- **`chat` 不是注册器**。它是"让大模型通过 tool_call 调用 `tool_manager`"的过程——链路是 `LLM → tool_manager → Agent.register`。
 - **`chat_ui` 不直接注册**，它直接调用 **Agent 的 `register` / `unregister`** 管理工具开关。
 - 真正的注册器只有 **Agent**。注册时把 `this`（= Agent）传给工具的 `register(ctx)`。
 - `executor` 已并入 `chat`，不再独立成原语。
@@ -43,7 +43,7 @@
         │                     │
         │  LLM tool_call       │ 直接调用 Agent.register/unregister
         ▼                     ▼
-   tool_register  ───────►   Agent (根注册器)
+   tool_manager   ───────►   Agent (根注册器)
         │                     │
         │                     ├─ tool.register(this = Agent)
         │                     ├─ 挂载 agent[name] = tool
@@ -82,7 +82,7 @@ UI ──enqueue(user)──▶ [ chat 消息队列 ] ──▶ 主线程 loop (
                                │                    │
                                │                    ├─▶ LLM: 文本回复 / tool_call
                                │                    │       │
-                               │                    │       ├─▶ tool_register (注册新 tool)
+                               │                    │       ├─▶ tool_manager (注册/删除/枚举 tool)
                                │                    │       └─▶ 执行 tool.call (executor 在 chat 内)
                                │                    │               │
                                │                    │◀── enqueue(tool_result) ┘
@@ -128,10 +128,10 @@ UI ──enqueue(user)──▶ [ chat 消息队列 ] ──▶ 主线程 loop (
 
 ### 5.1 注册器模式（`this` 传递）
 
-- **Agent 是唯一注册器**；`chat` / `chat_ui` / `tool_register` 都不是注册器。
+- **Agent 是唯一注册器**；`chat` / `chat_ui` / `tool_manager` 都不是注册器。
 - 注册时 `Agent.register(tool)` 内部调用 `tool.register(this)`，把 **`this`（=Agent 实例）** 作为注册上下文传给工具。
 - 工具据此可：注册子工具、enqueue、读取 `this.<name>` 取已挂载工具、访问共享服务。
-- `chat_ui` 通过直接调用 `Agent.register/unregister` 管理开关；LLM 通过 `tool_register`（→ `Agent.register`）自扩展。
+- `chat_ui` 通过直接调用 `Agent.register/unregister` 管理开关；LLM 通过 `tool_manager`（→ `Agent.register`/`unregister`）自扩展。
 
 ### 5.2 按名挂载
 
@@ -180,4 +180,4 @@ UI ──enqueue(user)──▶ [ chat 消息队列 ] ──▶ 主线程 loop (
 
 - 记忆 / 反思 / 规划均登记为普通 tool，核心保持 `chat` + `chat_ui` + 注册器。
 - 多 Agent 仅在确需时预留接口（层级式 Orchestrator），不做过度设计。
-- `tool_register` 让 LLM 具备自扩展能力（安装新 tool），是内核极少却可生长的关键支点。
+- `tool_manager` 让 LLM 具备自扩展能力（注册/删除/枚举 tool），是内核极少却可生长的关键支点。
