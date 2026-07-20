@@ -170,6 +170,36 @@ agent.sendMessage.beforeExe.push(() => ui.chat.setRunning(true, agent.chatStop))
 // ① 旧扁平 config → default:config 迁移；② 种子默认配置（无内容也落盘）；
 // ③ 绑定 agent 引用；④ 注册默认工具（→ 各 onRegister，含 session 落盘安装）；
 // ⑤ 重建持久化的自编排工具（→ onRegister 重建）。
+// 外部库兜底加载：@require 注入的 UMD 包在部分 Tampermonkey 沙箱中不会挂到裸全局
+// （UMD 误判 AMD/CommonJS 环境，走了 define(["exports"],...) 或 t(exports) 分支，
+// 导致裸 marked / DOMPurify 不可用）。这里用 GM_xmlhttpRequest 主动拉取源码，在隔离作用域
+// （屏蔽 module/exports/define 形参）执行 UMD，强制其走 globalThis 兜底分支把库挂到沙箱全局，
+// 供 tools/marked.ts 与用户注册的 marked 工具使用。若 @require 已成功挂全局则跳过，不重复加载。
+function ensureExternalLibs(): void {
+  const g = globalThis as unknown as Record<string, any>;
+  const gmx = (globalThis as any).GM_xmlhttpRequest;
+  if (typeof gmx === 'undefined') return; // 沙箱无 GM_xmlhttpRequest 时静默跳过（renderMarkdown 会回退转义文本）
+  const load = (url: string): void => {
+    gmx({
+      method: 'GET',
+      url,
+      onload: (r: { responseText: string }) => {
+        try {
+          // 隔离作用域：屏蔽 module/exports/define，迫使 UMD 走 (globalThis).<lib> = {} 兜底分支
+          new Function('module', 'exports', 'define', r.responseText)(undefined, undefined, undefined);
+        } catch (e) {
+          console.warn('[MiniAgent] 外部库执行失败:', url, e);
+        }
+      },
+      onerror: () => {
+        /* 离线 / CDN 不可达：静默跳过 */
+      },
+    });
+  };
+  if (typeof g.marked === 'undefined') load('https://cdn.jsdelivr.net/npm/marked@12/marked.min.js');
+  if (typeof g.DOMPurify === 'undefined') load('https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js');
+}
+
 function init(): void {
   storage.migrateFlatToNs('config', 'default', 'config');
   const cfg = getConfig(); // 先取 config（含工具黑名单 disabledTools）
@@ -182,6 +212,7 @@ function init(): void {
   executor.rehydrateHooks(agent); // 重建用户钩子（热插拔，刷新不丢）
 }
 init();
+ensureExternalLibs(); // 兜底加载 marked/DOMPurify 到沙箱全局（fire-and-forget，保证裸全局可用）
 
 // ---- 用户直接调用工具：/tool_name /param value /flag ----
 
