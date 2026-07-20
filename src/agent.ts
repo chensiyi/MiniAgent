@@ -79,7 +79,7 @@ export const agent = {
           ui.chat.append('assistant', '');
 
           // 流式累积（文本逐字更新、工具调用按 index 合并）
-          let content = '';
+          let content = '', reasoning = '';
           const acc: Record<number, { id: string; name: string; args: string }> = {};
           for await (const chunk of llm.streamChat({
             messages: agent.messages,
@@ -87,7 +87,11 @@ export const agent = {
           })) {
             if (chunk.delta) {
               content += chunk.delta;
-              ui.chat.updateLast('assistant', content);
+              ui.chat.updateLast('assistant', content, reasoning);
+            }
+            if (chunk.reasoning) {
+              reasoning += chunk.reasoning;
+              ui.chat.updateLast('assistant', content, reasoning);
             }
             if (chunk.toolCall) {
               const i = chunk.toolCall.index ?? 0;
@@ -97,6 +101,7 @@ export const agent = {
               if (chunk.toolCall.arguments) acc[i].args += chunk.toolCall.arguments;
             }
           }
+          ui.chat.finalizeLast('assistant', content, reasoning || undefined);
 
           const toolCalls: ToolCallLite[] = Object.values(acc).map((t) => ({
             id: t.id,

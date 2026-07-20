@@ -1,6 +1,7 @@
 import { GM_addStyle } from '$';
 import { withHooks } from '../core/withHooks';
 import { executor } from '../core/executor';
+import { renderMarkdown } from './markdown';
 
 // Trusted Types 兼容：require-trusted-types-for 'script' 下 innerHTML 必须是 TrustedHTML。
 // 建一次性策略包装 HTML；无 trustedTypes 或建策略失败则回退直接赋值。
@@ -34,6 +35,18 @@ const STYLE = `
 .ma-tools-panel{padding:8px;border:1px solid rgba(255,255,255,.6);border-radius:10px;background:rgba(255,255,255,.5);backdrop-filter:blur(10px);display:flex;flex-direction:column;gap:4px;max-height:40vh;overflow:auto}
 .ma-tool-row{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px}
 .ma-tool-name{word-break:break-all}
+.ma-think{margin:0 0 6px;border-left:3px solid #1677ff;border-radius:0 6px 6px 0;overflow:hidden}
+.ma-think summary{cursor:pointer;padding:4px 8px;font-size:12px;color:#555;background:rgba(22,119,255,.08);user-select:none}
+.ma-think summary:hover{background:rgba(22,119,255,.14)}
+.ma-think-body{padding:6px 8px;font-size:12px;color:#444;max-height:300px;overflow:auto;white-space:pre-wrap}
+.ma-md-content{white-space:normal}
+.ma-md-content p{margin:4px 0}
+.ma-md-content h1,.ma-md-content h2,.ma-md-content h3{margin:8px 0 4px;line-height:1.3}
+.ma-md-content ul,.ma-md-content ol{margin:4px 0;padding-left:20px}
+.ma-md-content blockquote{margin:4px 0;padding:2px 8px;border-left:3px solid rgba(0,0,0,.15);color:#666}
+.ma-md-content pre.ma-md-pre{max-height:200px;overflow:auto;margin:6px 0;padding:6px 8px;border-radius:6px;background:rgba(0,0,0,.06);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;white-space:pre-wrap;word-break:break-all}
+.ma-md-content code{padding:1px 4px;border-radius:3px;background:rgba(0,0,0,.06);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}
+.ma-md-content a{color:#1677ff}
 `;
 
 // 工具启停面板：读 executor.allToolStates()，每行开关调 setEnabled（即时生效+持久化，§3）
@@ -89,16 +102,39 @@ export const ui = {
     },
 
     append(role: string, text: string): void {
-      const el = document.createElement('div'); el.className = `ma-bubble ${role}`; el.textContent = text;
+      const el = document.createElement('div'); el.className = `ma-bubble ${role}`;
+      if (role === 'assistant') {
+        // 预建 think 折叠块（隐藏，有 reasoning 时显示）+ 正文容器
+        setHTML(el, '<details class="ma-think" style="display:none"><summary>💭 思考过程</summary><div class="ma-think-body"></div></details><div class="ma-md-content"></div>');
+        const c = el.querySelector('.ma-md-content') as HTMLElement; if (c) c.textContent = text;
+        lastAssistantEl = el;
+      } else {
+        el.textContent = text;
+        if (role === 'tool') lastToolEl = el;
+      }
       bubbles.append(el); bubbles.scrollTop = bubbles.scrollHeight;
-      if (role === 'assistant') lastAssistantEl = el;
-      else if (role === 'tool') lastToolEl = el;
     },
 
-    // 流式更新最近一条气泡：assistant 逐字 / tool 进度→结果
-    updateLast(role: string, text: string): void {
+    // 流式更新最近一条气泡：assistant 逐字文本+思考 / tool 进度→结果（流式用 textContent 快）
+    updateLast(role: string, text: string, reasoning?: string): void {
       const el = role === 'tool' ? lastToolEl : role === 'assistant' ? lastAssistantEl : null;
-      if (el) { el.textContent = text; bubbles.scrollTop = bubbles.scrollHeight; }
+      if (!el) return;
+      if (role === 'assistant') {
+        const c = el.querySelector('.ma-md-content') as HTMLElement; if (c) c.textContent = text;
+        if (reasoning != null) {
+          const think = el.querySelector('.ma-think') as HTMLElement;
+          if (think) { think.style.display = ''; const tb = el.querySelector('.ma-think-body') as HTMLElement; if (tb) tb.textContent = reasoning; }
+        }
+      } else { el.textContent = text; }
+      bubbles.scrollTop = bubbles.scrollHeight;
+    },
+    // 流结束：assistant 正文 + think 正文做 markdown 渲染（一次性，避免流式频繁 setHTML）
+    finalizeLast(role: string, text: string, reasoning?: string): void {
+      const el = role === 'assistant' ? lastAssistantEl : null;
+      if (!el) return;
+      const c = el.querySelector('.ma-md-content') as HTMLElement; if (c) setHTML(c, renderMarkdown(text));
+      const think = el.querySelector('.ma-think') as HTMLElement;
+      if (think) { if (reasoning) { const tb = el.querySelector('.ma-think-body') as HTMLElement; if (tb) setHTML(tb, renderMarkdown(reasoning)); } else think.remove(); }
     },
 
     // 运行态：发送变身停止（绑 onStop=agent.chatStop）并禁用输入
