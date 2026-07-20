@@ -170,34 +170,70 @@ agent.sendMessage.beforeExe.push(() => ui.chat.setRunning(true, agent.chatStop))
 // ① 旧扁平 config → default:config 迁移；② 种子默认配置（无内容也落盘）；
 // ③ 绑定 agent 引用；④ 注册默认工具（→ 各 onRegister，含 session 落盘安装）；
 // ⑤ 重建持久化的自编排工具（→ onRegister 重建）。
-// 外部库兜底加载：@require 注入的 UMD 包在部分 Tampermonkey 沙箱中不会挂到裸全局
-// （UMD 误判 AMD/CommonJS 环境，走了 define(["exports"],...) 或 t(exports) 分支，
-// 导致裸 marked / DOMPurify 不可用）。这里用 GM_xmlhttpRequest 主动拉取源码，在隔离作用域
-// （屏蔽 module/exports/define 形参）执行 UMD，强制其走 globalThis 兜底分支把库挂到沙箱全局，
-// 供 tools/marked.ts 与用户注册的 marked 工具使用。若 @require 已成功挂全局则跳过，不重复加载。
+// 外部库加载：marked / DOMPurify 经"外部 JS"引入（用户要求引用外部 js，而非内联打包）。
+// @require 注入的 UMD 在部分环境（尤其国内浏览器访问 jsDelivr 被墙）根本加载不进来，
+// 故改为运行时用 GM_xmlhttpRequest 主动拉取源码并执行。来源优先级：
+//   ① 本地 preview 服务（localhost:4173/vendor/*）—— 用户浏览器必能访问，零外网依赖，最稳；
+//   ② 国内镜像（npmmirror / bootcdn / baomitu）—— 兜底外网；
+//   ③ jsDelivr —— 最后尝试。
+// 执行时用 new Function 隔离作用域、屏蔽 module/exports/define 形参，迫使 UMD 走
+// (globalThis).<lib>={} 兜底分支把库挂到沙箱全局，供 tools/marked.ts 与用户注册的 marked 工具使用。
 function ensureExternalLibs(): void {
   const g = globalThis as unknown as Record<string, any>;
   const gmx = (globalThis as any).GM_xmlhttpRequest;
-  if (typeof gmx === 'undefined') return; // 沙箱无 GM_xmlhttpRequest 时静默跳过（renderMarkdown 会回退转义文本）
-  const load = (url: string): void => {
-    gmx({
-      method: 'GET',
-      url,
-      onload: (r: { responseText: string }) => {
-        try {
-          // 隔离作用域：屏蔽 module/exports/define，迫使 UMD 走 (globalThis).<lib> = {} 兜底分支
-          new Function('module', 'exports', 'define', r.responseText)(undefined, undefined, undefined);
-        } catch (e) {
-          console.warn('[MiniAgent] 外部库执行失败:', url, e);
-        }
-      },
-      onerror: () => {
-        /* 离线 / CDN 不可达：静默跳过 */
-      },
-    });
+  if (typeof gmx === 'undefined') {
+    console.warn('[MiniAgent] 无 GM_xmlhttpRequest，外部库无法加载，渲染将回退转义文本');
+    return;
+  }
+  // 来源优先级：本地 vendor 第一（零外网依赖），其次国内镜像，最后 jsDelivr
+  const SOURCES: Record<string, string[]> = {
+    marked: [
+      'http://localhost:4173/vendor/marked.min.js',
+      'https://registry.npmmirror.com/marked/12.0.2/files/marked.min.js',
+      'https://cdn.bootcdn.net/ajax/libs/marked/12.0.2/marked.min.js',
+      'https://lib.baomitu.com/marked/12.0.2/marked.min.js',
+      'https://cdn.jsdelivr.net/npm/marked@12/marked.min.js',
+    ],
+    DOMPurify: [
+      'http://localhost:4173/vendor/purify.min.js',
+      'https://registry.npmmirror.com/dompurify/3.1.6/files/dist/purify.min.js',
+      'https://cdn.bootcdn.net/ajax/libs/dompurify/3.1.6/purify.min.js',
+      'https://lib.baomitu.com/dompurify/3.1.6/purify.min.js',
+      'https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js',
+    ],
   };
-  if (typeof g.marked === 'undefined') load('https://cdn.jsdelivr.net/npm/marked@12/marked.min.js');
-  if (typeof g.DOMPurify === 'undefined') load('https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js');
+  const fetchText = (url: string): Promise<string> =>
+    new Promise((resolve, reject) => {
+      gmx({
+        method: 'GET',
+        url,
+        onload: (r: { responseText: string; status: number }) =>
+          r.status >= 200 && r.status < 300 ? resolve(r.responseText) : reject(new Error('HTTP ' + r.status)),
+        onerror: () => reject(new Error('network')),
+      });
+    });
+  const tryLoad = async (globalName: string, urls: string[]): Promise<void> => {
+    if (typeof g[globalName] !== 'undefined') {
+      console.log(`[MiniAgent] 外部库 ${globalName} 已存在，跳过加载`);
+      return;
+    }
+    for (const url of urls) {
+      try {
+        const src = await fetchText(url);
+        // 隔离作用域：屏蔽 module/exports/define，迫使 UMD 走 (globalThis).<lib>={} 兜底分支
+        new Function('module', 'exports', 'define', src)(undefined, undefined, undefined);
+        if (typeof g[globalName] !== 'undefined') {
+          console.log(`[MiniAgent] 外部库 ${globalName} 加载成功：${url}`);
+          return;
+        }
+      } catch (e) {
+        console.warn(`[MiniAgent] 外部库 ${globalName} 来源失败：${url}`, e instanceof Error ? e.message : e);
+      }
+    }
+    console.warn(`[MiniAgent] 外部库 ${globalName} 全部来源失败，渲染将回退转义文本`);
+  };
+  void tryLoad('marked', SOURCES.marked);
+  void tryLoad('DOMPurify', SOURCES.DOMPurify);
 }
 
 function init(): void {
