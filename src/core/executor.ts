@@ -586,8 +586,9 @@ const toolListTool: ToolDef = {
 };
 
 // 9) 会话管理：注册后自动把对话消息与工具调用落盘到 session 命名空间（session:<id>）
-//    register = 安装/重建入口：生成 sessionId、初始化会话记录、写 default:sessions 索引、
-//    并向 agent.sendMessage 挂载 afterExe 钩子，每次对话轮结束后自动落盘。
+//    register = 安装/重建入口：生成 sessionId、向 agent.sendMessage 挂载 afterExe 钩子。
+//    注意【惰性创建】：注册时不再立即写空记录，而是首次真实对话（afterExe 触发）才创建
+//    session:<id> 记录并写入 default:sessions 索引——避免每次页面刷新都产生空会话污染存储。
 //    幂等：避免重复注册累积 afterExe 钩子；unregister 时移除该钩子（防泄漏）。
 //    切换会话 / 会话重建留待后续（用户明确"再说"）。
 //    模块级状态：钩子引用 + 当前 sessionId（重注册时更新，避免 stale-id 持续写盘）。
@@ -611,21 +612,21 @@ const sessionTool: ToolDef = {
   register: (ctx) => {
     currentSessionId = genSessionId();
     ctx.agent.sessionId = currentSessionId;
-    // 初始化会话记录并落盘（消息/工具调用均在 messages 数组内，一并持久化）
-    const sess = { id: currentSessionId, createdAt: Date.now(), messages: [...ctx.agent.messages] };
-    ctx.storage.set('session', currentSessionId, sess);
-    // 写入会话索引 default:sessions
-    const idx = ctx.storage.get<string[]>('default', 'sessions') ?? [];
-    if (!idx.includes(currentSessionId)) {
-      idx.push(currentSessionId);
-      ctx.storage.set('default', 'sessions', idx);
-    }
+    // 注册时【不】立即落盘空记录：改为首次真实对话时惰性创建（见下方 persist 钩子），
+    // 避免每次页面刷新都无条件新建一条空会话、污染 session 命名空间与 default:sessions 索引。
     // 安装自动落盘（幂等：仅首次挂钩子，重注册复用同一引用；id 走模块级，避免累积/泄漏）
     if (!sessionPersistHook) {
       sessionPersistHook = () => {
         const id = currentSessionId;
         if (!id) return;
-        const cur = ctx.storage.get('session', id) ?? { id, createdAt: Date.now(), messages: [] };
+        const cur = ctx.storage.get('session', id);
+        if (!cur) {
+          // 惰性初始化：首次落盘才创建记录并写入会话索引（仅在确有对话时）
+          const idx = ctx.storage.get<string[]>('default', 'sessions') ?? [];
+          if (!idx.includes(id)) { idx.push(id); ctx.storage.set('default', 'sessions', idx); }
+          ctx.storage.set('session', id, { id, createdAt: Date.now(), messages: [...ctx.agent.messages] });
+          return;
+        }
         ctx.storage.set('session', id, { ...cur, messages: [...ctx.agent.messages] });
       };
       ctx.agent.sendMessage.afterExe.push(sessionPersistHook);
@@ -645,8 +646,13 @@ const sessionTool: ToolDef = {
     if (!id) return '会话未初始化';
     const action = String(args.action ?? 'info');
     if (action === 'save') {
-      const cur = ctx.storage.get('session', id) ?? { id, createdAt: Date.now(), messages: [] };
-      ctx.storage.set('session', id, { ...cur, messages: [...ctx.agent.messages] });
+      const cur = ctx.storage.get('session', id);
+      if (!cur) {
+        // 惰性创建并写入会话索引（与 persist 钩子一致）
+        const idx = ctx.storage.get<string[]>('default', 'sessions') ?? [];
+        if (!idx.includes(id)) { idx.push(id); ctx.storage.set('default', 'sessions', idx); }
+      }
+      ctx.storage.set('session', id, { ...(cur ?? { id, createdAt: Date.now() }), messages: [...ctx.agent.messages] });
       return `已落盘会话 ${id}（${ctx.agent.messages.length} 条消息）`;
     }
     const stored = ctx.storage.get('session', id);
