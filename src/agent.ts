@@ -1,7 +1,6 @@
 import { llm, type ChatMessage, type ToolCallLite } from './core/llm';
 import { executor, defaultTools, type ToolCall, type ToolDef } from './core/executor';
 import { storage } from './core/storage';
-import { bus } from './core/bus';
 import { ui } from './ui/ui';
 import { withHooks } from './core/withHooks';
 import { getSystemPrompt, getConfig } from './model/config';
@@ -29,7 +28,7 @@ export const agent = {
   toolCallQueue: [] as ToolCall[], // 待执行的工具调用
   sessionId: '', // 当前会话 id（由 session 工具的 onRegister 生成）
   storage, // 逻辑存储层（命名空间分区），供运行时 / LLM 动态读写与编辑
-  llm, executor, bus, // 暴露给 LLM 做自编排：动态注册工具 / 直接推理 / 事件订阅
+  llm, executor, // 暴露给 LLM 做自编排：动态注册工具 / 直接推理
   tools: new Map<string, ToolDef>(), // 按名挂载的权威表（文档 §5.2）
   _engineActive: false, // 引擎是否在跑（防止并发起多个引擎）
 
@@ -266,9 +265,13 @@ if (document.readyState === 'loading') {
   mount();
 }
 
-// 暴露全局单例：便于运行时 / LLM 动态编辑（呼应"全局单例 + 弱类型动态编辑"）
+// 暴露全局单例（标准用户脚本空间：沙箱内 globalThis，便于运行时 / LLM 动态编辑）
 (globalThis as unknown as { agent: typeof agent }).agent = agent;
 
-// 暴露到页面主世界，使 DevTools 控制台可直接访问（补偿 userscript 沙箱隔离）
-const uw = (globalThis as unknown as { unsafeWindow?: typeof globalThis }).unsafeWindow;
-if (uw) (uw as Record<string, unknown>).agent = agent;
+// 仅 dev 分支额外挂到 unsafeWindow，使 DevTools 控制台可直接访问（补偿 userscript 沙箱隔离）；
+// 发布分支（main/master 等）一律不挂，避免与页面主世界互相影响。
+declare const __BUILD_BRANCH__: string;
+if (__BUILD_BRANCH__ === 'dev') {
+  const uw = (globalThis as unknown as { unsafeWindow?: typeof globalThis }).unsafeWindow;
+  if (uw) (uw as Record<string, unknown>).agent = agent;
+}

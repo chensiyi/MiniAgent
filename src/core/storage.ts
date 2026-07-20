@@ -1,11 +1,10 @@
 import { GM_getValue, GM_setValue, GM_deleteValue, GM_listValues } from '$';
 import { withHooks } from './withHooks';
 import type { ToolDesc } from './executor';
-import { bus } from './bus';
 
 // 逻辑存储层：薄封装 Tampermonkey GM_*，自动 JSON 序列化/反序列化。
 // 存储按"命名空间"分区：realKey = `${ns}:${key}`（如 default:config / session:<id> / tools:<name>）。
-// 仅 set 包 withHooks（afterExe 广播 storage:changed，供订阅）；get/del/keys 为基础操作无需钩子。
+// set 包 withHooks（保留扩展钩子能力）；get/del/keys 为基础操作无需钩子。
 
 const NS_SEP = ':';
 
@@ -59,7 +58,3 @@ export const storage = {
       .filter((d): d is ToolDesc => !!d);
   },
 };
-
-storage.set.afterExe.push((opts) => {
-  bus.emit('storage:changed', { ns: opts.args[0], key: opts.args[1] }); // 跨标签页广播：订阅者可定向刷新 {ns,key}
-});

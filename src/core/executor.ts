@@ -86,10 +86,14 @@ export interface ToolCall {
   args: Record<string, unknown>;
 }
 
+// 系统作者默认标识：新工具未指定 author 时默认取此值（用户 2026-07-20："所有工具作者都叫sys"）。
+// 工具面（tool_manager）的更新/编辑不再按 author 限制，统一以"用户确认"为闸门（用户 2026-07-20："所有工具均可经用户确认后更新"）。
+const SYS_AUTHOR = 'sys';
+
 // agent 上的保留属性名：挂载 agent[name] 时跳过，避免覆盖核心方法/状态
 const RESERVED = new Set<string>([
   'messages', 'messageQueue', 'toolCallQueue', 'sessionId', 'storage', 'llm',
-  'executor', 'bus', '_engineActive', 'isRunning', 'chatStop', 'engine',
+  'executor', '_engineActive', 'isRunning', 'chatStop', 'engine',
   'sendMessage', 'chat', 'tools', 'orchestrateSystemPrompt',
 ]);
 
