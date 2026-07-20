@@ -170,14 +170,12 @@ agent.sendMessage.beforeExe.push(() => ui.chat.setRunning(true, agent.chatStop))
 // ① 旧扁平 config → default:config 迁移；② 种子默认配置（无内容也落盘）；
 // ③ 绑定 agent 引用；④ 注册默认工具（→ 各 onRegister，含 session 落盘安装）；
 // ⑤ 重建持久化的自编排工具（→ onRegister 重建）。
-// 外部库加载：marked / DOMPurify 经"外部 JS"引入（用户要求引用外部 js，而非内联打包）。
-// @require 注入的 UMD 在部分环境（尤其国内浏览器访问 jsDelivr 被墙）根本加载不进来，
-// 故改为运行时用 GM_xmlhttpRequest 主动拉取源码并执行。来源优先级：
-//   ① 本地 preview 服务（localhost:4173/vendor/*）—— 用户浏览器必能访问，零外网依赖，最稳；
-//   ② 国内镜像（npmmirror / bootcdn / baomitu）—— 兜底外网；
-//   ③ jsDelivr —— 最后尝试。
+// 外部库加载（仅用于"智能体自身的聊天 markdown 渲染"，非工具行为）：
+// marked / DOMPurify 经"外部 JS"引入（用户要求引用外部 js，而非内联打包）。
+// 工具自身的依赖请用 tool_manager register 的 /libs 参数在安装期 fetch 并内联（自包含），不走这里。
+// 本函数默认源 jsDelivr（用户指定"默认用 jsDelivr 外国 CDN"），并附国内镜像兜底（聊天渲染无"安装"步骤、需随启动就绪）。
 // 执行时用 new Function 隔离作用域、屏蔽 module/exports/define 形参，迫使 UMD 走
-// (globalThis).<lib>={} 兜底分支把库挂到沙箱全局，供 tools/marked.ts 与用户注册的 marked 工具使用。
+// (globalThis).<lib>={} 兜底分支把库挂到沙箱全局，供 tools/marked.ts 的 renderMarkdown 使用。
 function ensureExternalLibs(): void {
   const g = globalThis as unknown as Record<string, any>;
   const gmx = (globalThis as any).GM_xmlhttpRequest;
@@ -188,18 +186,16 @@ function ensureExternalLibs(): void {
   // 来源优先级：本地 vendor 第一（零外网依赖），其次国内镜像，最后 jsDelivr
   const SOURCES: Record<string, string[]> = {
     marked: [
-      'http://localhost:4173/vendor/marked.min.js',
+      'https://cdn.jsdelivr.net/npm/marked@12/marked.min.js',
       'https://registry.npmmirror.com/marked/12.0.2/files/marked.min.js',
       'https://cdn.bootcdn.net/ajax/libs/marked/12.0.2/marked.min.js',
       'https://lib.baomitu.com/marked/12.0.2/marked.min.js',
-      'https://cdn.jsdelivr.net/npm/marked@12/marked.min.js',
     ],
     DOMPurify: [
-      'http://localhost:4173/vendor/purify.min.js',
+      'https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js',
       'https://registry.npmmirror.com/dompurify/3.1.6/files/dist/purify.min.js',
       'https://cdn.bootcdn.net/ajax/libs/dompurify/3.1.6/purify.min.js',
       'https://lib.baomitu.com/dompurify/3.1.6/purify.min.js',
-      'https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js',
     ],
   };
   const fetchText = (url: string): Promise<string> =>
