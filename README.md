@@ -28,12 +28,12 @@
 | **ui.chat** | UI 渲染层：输入 / 气泡 / send-stop / 流式 / 工具开关面板 | 否（调用 Agent 的注册能力） |
 | **tool** | 注册单元：声明 `name+author` / `deps`，可选 `call` | 否（被注册的对象） |
 | **code_run** | 一个 tool（有 `call`），提供一次性代码执行能力 | 否 |
-| **toolregister** | 暴露给 LLM 的"注册工具"tool；LLM 经 tool_call 调用它来注册新 tool | 否（包装 `executor.register`） |
+| **tool_register** | 暴露给 LLM 的"注册工具"tool；LLM 经 tool_call 调用它来注册新 tool | 否（包装 `executor.register`） |
 | **tools 命名空间** | 持久化所有 tool 定义的存储命名空间（真相源） | — |
 
 **关键澄清**：
 
-- `chat` 不是注册器。它是"让大模型通过 tool_call 调用 `toolregister`"的过程——链路是 `LLM → toolregister → executor.register`。
+- `chat` 不是注册器。它是"让大模型通过 tool_call 调用 `tool_register`"的过程——链路是 `LLM → tool_register → executor.register`。
 - `ui.chat` 不直接注册，它调用 **executor 的 `setEnabled`**（内部走 register/unregister）来管理工具开关。
 - 真正的注册器只有 **executor**（挂载于 agent）。注册时把 `this`（= Agent）传给工具的 `register(ctx)`。
 
@@ -48,7 +48,7 @@
         │                      │
         │ LLM tool_call         │ setEnabled → register/unregister
         ▼                      ▼
-   toolregister  ───────►  executor (根注册器)
+   tool_register  ───────►  executor (根注册器)
         │                      │
         │                      ├─ tool.register(ctx.this = Agent)
         │                      ├─ 挂载 agent[name] = tool

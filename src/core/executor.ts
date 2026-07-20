@@ -480,9 +480,9 @@ const codeRunTool: ToolDef = {
   },
 };
 
-// 5) 注册自编排工具（持久化 + 注册 → register 重建）；对齐文档 toolregister 语义
+// 5) 注册自编排工具（持久化 + 注册 → register 重建）；对齐文档 tool_register 语义
 const toolRegisterTool: ToolDef = {
-  name: 'toolregister',
+  name: 'tool_register',
   author: 'core',
   description:
     '注册一个新工具（自编排）：持久化到 tools 命名空间（系统真相源），重载后按依赖拓扑自动重建。code 为 call 源码；register 可选为安装源码。',
