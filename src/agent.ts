@@ -236,7 +236,12 @@ async function handleToolCommand(text: string): Promise<void> {
     { id: 'cmd-' + Date.now().toString(36), name: parsed.name, args: parsed.args },
     agent,
   );
-  ui.chat.updateLast('tool', `⚙ ${parsed.name}: ${obs}`);
+  // marked 工具返回 HTML，直接渲染；其它工具结果用 textContent 显示原始文本
+  if (parsed.name === 'marked') {
+    ui.chat.setToolHTML(`⚙ ${parsed.name}: ${String(obs)}`);
+  } else {
+    ui.chat.updateLast('tool', `⚙ ${parsed.name}: ${obs}`);
+  }
 }
 
 // 配置不完整时的提示文案

@@ -3,6 +3,9 @@ import { withHooks } from '../core/withHooks';
 import { executor } from '../core/executor';
 import { renderMarkdown } from '../../tools/marked';
 
+// @require 注入的外部库，运行期在 userscript 全局作用域可用
+declare const DOMPurify: { sanitize(dirty: string, config?: Record<string, unknown>): string; [key: string]: unknown };
+
 // Trusted Types 兼容：require-trusted-types-for 'script' 下 innerHTML 必须是 TrustedHTML。
 // 建一次性策略包装 HTML；无 trustedTypes 或建策略失败则回退直接赋值。
 const _tt = (globalThis as unknown as { trustedTypes?: { createPolicy: (n: string, r: { createHTML: (s: string) => string }) => { createHTML: (s: string) => unknown } } }).trustedTypes;
@@ -243,6 +246,18 @@ export const ui = {
       } else { el.textContent = text; }
       bubbles.scrollTop = bubbles.scrollHeight;
     },
+
+    // 把最近一条 tool 气泡渲染为 HTML（经 DOMPurify 清洗）。用于 marked 等返回 HTML 的工具结果。
+    setToolHTML(html: string): void {
+      if (!lastToolEl) return;
+      if (typeof DOMPurify !== 'undefined' && typeof DOMPurify.sanitize === 'function') {
+        setHTML(lastToolEl, DOMPurify.sanitize(html));
+      } else {
+        lastToolEl.textContent = html; // 清洗库不可用时回退纯文本，避免 XSS
+      }
+      bubbles.scrollTop = bubbles.scrollHeight;
+    },
+
     // 流结束：assistant 正文 + think 正文做 markdown 渲染（一次性，避免流式频繁 setHTML）
     finalizeLast(role: string, text: string, reasoning?: string): void {
       const el = role === 'assistant' ? lastAssistantEl : null;
