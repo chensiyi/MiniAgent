@@ -14,45 +14,47 @@ if (_tt) {
 }
 function setHTML(el: Element, html: string): void { el.innerHTML = _hp ? (_hp.createHTML(html) as unknown as string) : html; }
 
-// 气泡区（玻璃在每条气泡上）+ 输入行（输入框 + 发送/停止/工具开关）
+// 玻璃方框浮层（对齐 docs/ui-design.html v4）：容器透明无背景板、无圆角、深色玻璃 + 浅色字、顶部遮罩淡出
 const STYLE = `
-#miniagent-root{position:fixed;right:16px;bottom:16px;z-index:2147483647;width:320px;display:flex;flex-direction:column;gap:8px;font:14px system-ui;color:#1a1c22}
-.ma-bubbles{display:flex;flex-direction:column;max-height:100vh;overflow-y:auto;gap:6px}
-.ma-bubble{padding:8px 12px;max-width:300px;white-space:pre-wrap;word-break:break-word;border-radius:12px;border:1px solid rgba(255,255,255,.6);background:rgba(255,255,255,.5);backdrop-filter:blur(10px)}
-.ma-bubble.assistant{background:rgba(214,234,255,.55)}
-.ma-bubble.tool{font-size:12px;background:rgba(255,243,224,.65)}
+:root{--brand:#378DDD;--brand-soft:rgba(55,141,221,.22);--glass:rgba(18,26,44,.52);--glass-strong:rgba(22,31,52,.66);--glass-border:rgba(255,255,255,.16);--glass-border-strong:rgba(255,255,255,.26);--text:#eef2ff;--text-dim:rgba(238,242,255,.62);--risk-high:#fb923c}
+#miniagent-root{position:fixed;right:16px;bottom:16px;z-index:2147483647;width:320px;max-height:calc(100vh - 32px);display:flex;flex-direction:column;gap:8px;font:14px system-ui;color:var(--text)}
+.ma-bubbles{flex:1 1 auto;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:6px;padding:4px 2px;-webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 10%,#000 100%);mask-image:linear-gradient(to bottom,transparent 0,#000 10%,#000 100%)}
+.ma-bubble{padding:6px 9px;max-width:88%;white-space:pre-wrap;word-break:break-word;border:1px solid var(--glass-border);background:var(--glass);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);box-shadow:0 2px 10px rgba(0,0,0,.18);align-self:flex-start}
+.ma-bubble.user{align-self:flex-end;background:var(--brand-soft);border-color:rgba(55,141,221,.5)}
+.ma-bubble.tool{align-self:flex-start;font-size:12px;background:rgba(18,26,44,.62)}
 .ma-input-row{display:flex;gap:6px;align-items:center;position:relative}
-.ma-ac{position:absolute;left:0;right:0;bottom:100%;margin-bottom:4px;background:rgba(255,255,255,.94);backdrop-filter:blur(10px);border:1px solid rgba(0,0,0,.12);border-radius:8px;overflow:auto;max-height:210px;box-shadow:0 4px 16px rgba(0,0,0,.12)}
+.ma-ac{position:absolute;left:0;right:0;bottom:100%;margin-bottom:4px;background:var(--glass-strong);border:1px solid var(--glass-border);overflow:auto;max-height:210px;box-shadow:0 4px 16px rgba(0,0,0,.3);color:var(--text)}
 .ma-ac-item{padding:6px 10px;cursor:pointer;display:flex;flex-direction:column;gap:1px}
-.ma-ac-item.active,.ma-ac-item:hover{background:rgba(22,119,255,.12)}
-.ma-ac-name{font-weight:600;color:#1677ff;font-size:12px}
-.ma-ac-hint{color:#888;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ma-input{flex:1;min-width:0;padding:8px 10px;border:1px solid rgba(0,0,0,.15);border-radius:8px;outline:0;background:rgba(255,255,255,.7);backdrop-filter:blur(10px)}
-.ma-input-row button{padding:8px 14px;border:0;border-radius:8px;background:#1677ff;color:#fff;cursor:pointer;white-space:nowrap}
-.ma-input-row button.stop{background:#ff4d4f}
-.ma-code{max-height:160px;overflow:auto;margin:6px 0;padding:6px 8px;border-radius:8px;background:rgba(0,0,0,.06);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;white-space:pre-wrap;word-break:break-all}
+.ma-ac-item.active,.ma-ac-item:hover{background:var(--brand-soft)}
+.ma-ac-name{font-weight:600;color:#6fb0f0;font-size:12px}
+.ma-ac-hint{color:var(--text-dim);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ma-input{flex:1;min-width:0;padding:8px 10px;border:1px solid var(--glass-border);outline:0;background:var(--glass);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);color:var(--text)}
+.ma-input::placeholder{color:var(--text-dim)}
+.ma-input-row button{padding:8px 14px;border:1px solid rgba(55,141,221,.5);background:rgba(55,141,221,.85);color:#fff;cursor:pointer;white-space:nowrap}
+.ma-input-row button.stop{background:rgba(248,113,113,.85);border-color:rgba(248,113,113,.5)}
+.ma-code{max-height:160px;overflow:auto;margin:6px 0;padding:6px 8px;background:rgba(0,0,0,.35);color:#cfe0f5;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;white-space:pre-wrap;word-break:break-all}
 .ma-approve{display:flex;gap:8px;margin-top:4px}
-.ma-approve button{flex:1;border:0;border-radius:8px;padding:5px 0;font-size:12px;cursor:pointer}
-.ma-approve .ok{background:#1677ff;color:#fff}
-.ma-approve .no{background:rgba(0,0,0,.08);color:#444}
-.ma-risk{color:#ff4d4f;font-weight:600}
-.ma-tools{padding:8px 10px;border:0;border-radius:8px;background:rgba(255,255,255,.7);backdrop-filter:blur(10px);cursor:pointer}
-.ma-tools-panel{padding:8px;border:1px solid rgba(255,255,255,.6);border-radius:10px;background:rgba(255,255,255,.5);backdrop-filter:blur(10px);display:flex;flex-direction:column;gap:4px;max-height:40vh;overflow:auto}
+.ma-approve button{flex:1;border:0;padding:5px 0;font-size:12px;cursor:pointer;color:#fff}
+.ma-approve .ok{background:rgba(55,141,221,.9)}
+.ma-approve .no{background:rgba(255,255,255,.12);color:var(--text)}
+.ma-risk{color:var(--risk-high);font-weight:600}
+.ma-tools{padding:8px 10px;border:1px solid var(--glass-border);background:var(--glass);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);cursor:pointer}
+.ma-tools-panel{padding:8px;border:1px solid var(--glass-border-strong);background:var(--glass-strong);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);display:flex;flex-direction:column;gap:4px;max-height:40vh;overflow:auto}
 .ma-tool-row{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px}
 .ma-tool-name{word-break:break-all;flex-shrink:0}
-.ma-tool-desc{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;color:#888;font-size:11px}
-.ma-think{margin:0 0 6px;border-left:3px solid #1677ff;border-radius:0 6px 6px 0;overflow:hidden}
-.ma-think summary{cursor:pointer;padding:4px 8px;font-size:12px;color:#555;background:rgba(22,119,255,.08);user-select:none}
-.ma-think summary:hover{background:rgba(22,119,255,.14)}
-.ma-think-body{padding:6px 8px;font-size:12px;color:#444;max-height:300px;overflow:auto;white-space:pre-wrap}
-.ma-md-content{white-space:normal}
+.ma-tool-desc{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;color:var(--text-dim);font-size:11px}
+.ma-think{margin:0 0 6px;border-left:3px solid var(--brand);overflow:hidden}
+.ma-think summary{cursor:pointer;padding:4px 8px;font-size:12px;color:var(--text-dim);background:var(--brand-soft);user-select:none}
+.ma-think summary:hover{background:rgba(55,141,221,.14)}
+.ma-think-body{padding:6px 8px;font-size:12px;color:var(--text-dim);max-height:300px;overflow:auto;white-space:pre-wrap}
+.ma-md-content{color:var(--text);white-space:normal}
 .ma-md-content p{margin:4px 0}
 .ma-md-content h1,.ma-md-content h2,.ma-md-content h3{margin:8px 0 4px;line-height:1.3}
 .ma-md-content ul,.ma-md-content ol{margin:4px 0;padding-left:20px}
-.ma-md-content blockquote{margin:4px 0;padding:2px 8px;border-left:3px solid rgba(0,0,0,.15);color:#666}
-.ma-md-content pre.ma-md-pre{max-height:200px;overflow:auto;margin:6px 0;padding:6px 8px;border-radius:6px;background:rgba(0,0,0,.06);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;white-space:pre-wrap;word-break:break-all}
-.ma-md-content code{padding:1px 4px;border-radius:3px;background:rgba(0,0,0,.06);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}
-.ma-md-content a{color:#1677ff}
+.ma-md-content blockquote{margin:4px 0;padding:2px 8px;border-left:3px solid var(--glass-border);color:var(--text-dim)}
+.ma-md-content pre.ma-md-pre{max-height:200px;overflow:auto;margin:6px 0;padding:6px 8px;background:rgba(0,0,0,.3);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;white-space:pre-wrap;word-break:break-all}
+.ma-md-content code{padding:1px 4px;background:rgba(255,255,255,.12);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}
+.ma-md-content a{color:#6fb0f0}
 `;
 
 // 工具启停面板：读 executor.allToolStates()，每行开关调 setEnabled（即时生效+持久化，§3）
@@ -159,10 +161,10 @@ export const ui = {
       setHTML(root, `
         <div class="ma-bubbles"></div>
         <div class="ma-input-row">
+          <button class="ma-tools" type="button" title="工具开关">⚙</button>
           <input class="ma-input" type="text" placeholder="问点什么…（Enter 发送）" />
           <button class="ma-send" type="button">发送</button>
           <button class="ma-stop" type="button" style="display:none">停止</button>
-          <button class="ma-tools" type="button" title="工具开关">⚙</button>
         </div>
         <div class="ma-tools-panel" style="display:none"></div>`);
       document.body.append(root);
