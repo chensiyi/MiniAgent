@@ -179,6 +179,7 @@ function init(): void {
   const bootList = defaultTools.filter((t) => !disabled.has(t.name)); // 黑名单直接移出名单（文档 §3/§5.2）
   executor.registerAll(bootList); // 拓扑序注册默认工具（已剔除黑名单）
   executor.rehydrateTools(); // 重建启用的自编排工具（拓扑序）
+  executor.rehydrateHooks(agent); // 重建用户钩子（热插拔，刷新不丢）
 }
 init();
 

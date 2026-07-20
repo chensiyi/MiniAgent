@@ -1,6 +1,7 @@
 import { storage } from './storage';
 import { ui } from '../ui/ui';
-import { REQUIRE_CODE_APPROVAL, APPROVAL_RISK_LEVEL, riskAtLeast, getConfig, saveConfig } from '../model/config';
+import { llm } from './llm';
+import { REQUIRE_CODE_APPROVAL, APPROVAL_RISK_LEVEL, riskAtLeast, getConfig, saveConfig, getSystemPrompt } from '../model/config';
 import { withHooks, type HookedFunction } from './withHooks';
 
 // executor 的结构化视图（避免 typeof executor 前向引用）
@@ -11,6 +12,7 @@ export interface ExecutorLike {
   registerAll(tools: ToolDef[]): { registered: string[]; rejected: string[] };
   list(includeAll?: boolean): ToolDef[];
   setEnabled(name: string, enabled: boolean): void;
+  rehydrateHooks(agent: AgentLike): void;
   allToolStates(): { name: string; author?: string; enabled: boolean; builtin: boolean; description?: string }[];
   run(call: ToolCall, agentArg?: AgentLike): Promise<string>;
 }
@@ -23,9 +25,9 @@ export interface AgentLike {
   storage: typeof storage;
   llm: any;
   executor: ExecutorLike;
-  bus: any;
   tools: Map<string, ToolDef>; // 按名挂载的权威表（文档 §5.2）
   sendMessage: ((text: string) => Promise<void>) & HookedFunction;
+  engine?: HookedFunction; // 队列循环（钩子目标之一）
 }
 
 // 工具运行时上下文：底层能力注入为 ctx，避免工具依赖未注入的全局变量。
@@ -122,6 +124,35 @@ export function buildToolFromDesc(desc: ToolDesc): ToolDef {
   if (desc.register) tool.register = compileFn(desc.register) as (ctx: RegisterCtx) => void;
   if (desc.unregister) tool.unregister = compileFn(desc.unregister) as (ctx: RegisterCtx) => void;
   return tool;
+}
+
+// 把多行 JSON 续行缩进到统一 pad，便于原样嵌进对象字面量（仅影响缩进，不改语义）。
+function indentBlock(s: string, pad: string): string {
+  return s.split('\n').map((l, i) => (i === 0 ? l : pad + l)).join('\n');
+}
+
+// 把一个工具定义/描述符导出为可直接注册的 JS 源码（控制台粘贴即用）。
+// 自编排工具优先用持久化的源码串（call/register/unregister 皆为可重编译文本）；
+// 内置工具退化为函数 toString —— 若其 call 体引用了模块内闭包（ui/storage 等），跨上下文重注册需自行调整。
+export function exportToolToJs(desc: ToolDesc): string {
+  const header = [
+    `// MiniAgent 工具导出：${desc.name}`,
+    '// 复制以下代码到浏览器控制台（需 agent 在作用域，如 globalThis.agent）执行即可注册该工具。',
+  ].join('\n');
+  const parts: string[] = [];
+  parts.push('const __tool = {');
+  parts.push(`  name: ${JSON.stringify(desc.name)},`);
+  parts.push(`  author: ${JSON.stringify(desc.author ?? SYS_AUTHOR)},`);
+  parts.push(`  description: ${JSON.stringify(desc.description)},`);
+  parts.push(`  inputSchema: ${indentBlock(JSON.stringify(desc.inputSchema ?? {}, null, 2), '  ')},`);
+  if (desc.deps && desc.deps.length) parts.push(`  deps: ${indentBlock(JSON.stringify(desc.deps, null, 2), '  ')},`);
+  if (desc.riskLevel) parts.push(`  riskLevel: ${JSON.stringify(desc.riskLevel)},`);
+  parts.push(`  call: ${desc.code},`);
+  if (desc.register) parts.push(`  register: ${desc.register},`);
+  if (desc.unregister) parts.push(`  unregister: ${desc.unregister},`);
+  parts.push('};');
+  parts.push('(globalThis.agent?.executor ?? (typeof executor !== "undefined" ? executor : null))?.register(__tool);');
+  return header + '\n' + parts.join('\n');
 }
 
 // 依赖校验（按 name 匹配；缺失→拒绝；author 不符→收集警告但可继续，§5）
@@ -343,6 +374,27 @@ export const executor = {
     if (rejected.length) console.warn('[MiniAgent] 部分工具未注册（依赖缺失/循环）:', rejected);
     else console.log('[MiniAgent] 重建工具:', registered);
   },
+
+  // 重建用户钩子：读 hooks 命名空间全部描述符 → 编译 → 挂接到运行期钩子数组（镜像 rehydrateTools）。
+  rehydrateHooks(agentRef: AgentLike): void {
+    for (const id of storage.keys('hooks')) {
+      const desc = storage.get<{ id: string; name: string; target: string; phase: string; code: string }>('hooks', id);
+      if (!desc || !desc.code) continue;
+      const target = resolveTarget(desc.target, agentRef);
+      if (!target) {
+        console.warn('[MiniAgent] 钩子 target 不存在，跳过:', desc.target);
+        continue;
+      }
+      try {
+        const wrapped = compileHook(desc.code, desc.name, agentRef);
+        wrapped.__hookId = id;
+        (target as any)[desc.phase + 'Exe'].push(wrapped);
+        console.log('[MiniAgent] 重建钩子:', desc.name, '→', desc.target + '.' + desc.phase);
+      } catch (e) {
+        console.warn('[MiniAgent] 重建钩子失败:', desc.name, e);
+      }
+    }
+  },
 };
 
 // ---- 会话 id 生成（crypto.randomUUID 优先，退化到时间戳+随机）----
@@ -520,26 +572,196 @@ const toolManagerTool: ToolDef = {
           })),
         );
       }
+      case 'export': {
+        const name = String(args.name ?? '');
+        if (!name) return '参数 name 缺失';
+        // 优先取运行期 ToolDef（含函数体，经 toString 取源码）；否则取持久化的 ToolDesc（含源码串）。
+        const live = registry.get(name);
+        const desc: ToolDesc | undefined = live
+          ? {
+              name: live.name,
+              author: live.author,
+              description: live.description,
+              inputSchema: live.inputSchema,
+              deps: live.deps,
+              riskLevel: live.riskLevel,
+              code: live.call ? live.call.toString() : '',
+              register: live.register ? live.register.toString() : undefined,
+              unregister: live.unregister ? live.unregister.toString() : undefined,
+              enabled: true,
+            }
+          : ctx.storage.get<ToolDesc>('tools', name);
+        if (!desc || !desc.code) return `未找到可导出的工具: ${name}`;
+        // 以 markdown 代码块包裹，便于在聊天里直接复制。
+        return '```js\n' + exportToolToJs(desc) + '\n```';
+      }
       default:
-        return `未知 action: ${action}（支持 register/remove/list）`;
+        return `未知 action: ${action}（支持 register/remove/list/export）`;
     }
   },
 };
 
-// 6) 系统编排发送原语（无 call → 不进 LLM tool_call 清单，文档 §7；仍注册挂载，供 tool_manager 揭示完整能力面）
-const orchestrateSendTool: ToolDef = {
-  name: 'orchestrate_send',
-  author: 'core',
+// 6) 系统编排管理：查看并热更新运行期"编排"（钩子 + 系统提示 + 工具面）。带 call → 进 LLM 清单，自我组织闭环。
+//    钩子目标 = 被 withHooks 包、带 beforeExe/afterExe 数组的函数。存储独立于 config：每钩子存 hooks:<id>。
+const HOOK_TARGETS = ['sendMessage', 'engine', 'run', 'streamChat', 'chat', 'requestApproval', 'storageSet'] as const;
+
+// 把 target 名解析到真实的 withHooks 包装函数（运行期钩子数组所在处）。
+function resolveTarget(name: string, agentRef: AgentLike): HookedFunction | null {
+  const map: Record<string, HookedFunction | undefined> = {
+    sendMessage: agentRef.sendMessage as unknown as HookedFunction,
+    engine: (agentRef as unknown as { engine?: HookedFunction }).engine as HookedFunction,
+    run: executor.run as unknown as HookedFunction,
+    streamChat: llm.streamChat as unknown as HookedFunction,
+    chat: llm.chat as unknown as HookedFunction,
+    requestApproval: ui.requestApproval as unknown as HookedFunction,
+    storageSet: storage.set as unknown as HookedFunction,
+  };
+  return map[name] ?? null;
+}
+
+// 把钩子体编译成安全包装函数：用户 fn 抛错不会影响主循环；打 __userHook/__name 标记供 view 区分来源。
+function compileHook(code: string, name: string, agentRef: AgentLike): ((opts: any) => void) & Record<string, unknown> {
+  const userFn = new Function('opts', 'agent', 'storage', 'executor', 'console', code) as (
+    opts: any,
+    agent: any,
+    storage: any,
+    executor: any,
+    console: Console,
+  ) => void;
+  const wrapped = ((hookOpts: any) => {
+    try {
+      userFn(hookOpts, agentRef, storage, executor, console);
+    } catch (e) {
+      console.error('[hook]', name, e);
+    }
+  }) as ((opts: any) => void) & Record<string, unknown>;
+  wrapped.__userHook = true;
+  wrapped.__name = name;
+  return wrapped;
+}
+
+const orchestrateTool: ToolDef = {
+  name: 'orchestrate',
+  author: 'sys',
   description:
-    '系统编排发送原语：把文本作为用户消息送入工作循环并触发推理。正常对话无需调用；研究自我组织时它代表"驱动循环"这一系统原语。',
+    '系统编排管理：查看并热更新当前智能体的"编排"（运行期钩子 + 系统提示 + 工具面）。action 取值 view（查看实时编排快照：系统提示 + 各钩子目标 sendMessage/engine/run/streamChat/chat/requestApproval/storageSet 的运行期钩子清单（含 name 与 id）+ 工具清单 + 引擎参数）/ update（改写系统提示并热生效，需传 systemPrompt）/ addHook（热挂接用户钩子，需传 name/target/phase/code；code 为钩子体，签名 (opts, agent, storage, executor, console)，可经 opts.args 改写请求/消息，如在 streamChat.before 里改 opts.args[0].messages 即可在请求发出前编辑内容）/ removeHook（移除用户钩子，需传 hookId 或 name；按 name 移除所有同名用户钩子）。update/addHook/removeHook 执行前均弹确认框。',
   inputSchema: {
     type: 'object',
-    properties: { text: { type: 'string', description: '要送入循环的用户文本' } },
-    required: ['text'],
+    properties: {
+      action: {
+        type: 'string',
+        enum: ['view', 'update', 'addHook', 'removeHook'],
+        description: 'view=查看快照(默认)；update=改写系统提示；addHook=挂接用户钩子；removeHook=移除用户钩子',
+      },
+      systemPrompt: { type: 'string', description: 'update 时用的新系统提示全文' },
+      name: { type: 'string', description: 'addHook 时钩子显示名；removeHook 时按名移除（移除所有同名用户钩子）。与 hookId 二选一' },
+      target: {
+        type: 'string',
+        enum: ['sendMessage', 'engine', 'run', 'streamChat', 'chat', 'requestApproval', 'storageSet'],
+        description: 'addHook 时挂接到哪个钩子目标',
+      },
+      phase: { type: 'string', enum: ['before', 'after'], description: 'addHook 时 before/after 阶段（默认 before）' },
+      code: {
+        type: 'string',
+        description: 'addHook 时的钩子体源码。会被包成 (opts, agent, storage, executor, console) => void：可通过改写 opts.args 影响请求/消息（如在 streamChat.before 里改 opts.args[0].messages 即可在请求发出前编辑内容）；agent/storage/executor/console 为运行时上下文。示例："console.log(opts.args);"。',
+      },
+      hookId: { type: 'string', description: 'removeHook 时目标钩子 id（与 name 二选一）' },
+    },
   },
-  register: (ctx) => {
-    // 安装：把 sendMessage 暴露为可经 this.orchestrateSend 调用的系统方法（便于其它工具驱动循环）
-    (ctx.this as unknown as Record<string, unknown>).orchestrateSend = (text: string) => ctx.agent.sendMessage(text);
+  call: async (args, ctx) => {
+    const action = String(args.action ?? 'view');
+    if (action === 'view') {
+      const hooksSnap: Record<string, { before: { name: string; id: string | null }[]; after: { name: string; id: string | null }[] }> = {};
+      for (const t of HOOK_TARGETS) {
+        const fn = resolveTarget(t, ctx.agent);
+        if (!fn) {
+          hooksSnap[t] = { before: [], after: [] };
+          continue;
+        }
+        // 每个钩子带 name + id（user 钩子有 id，core 钩子 id 为 null）——便于编排查看与按名/按 id 回收
+        const describe = (f: any): { name: string; id: string | null } =>
+          f.__userHook
+            ? { name: String(f.__name ?? 'userHook'), id: (f.__hookId as string) ?? null }
+            : { name: '(core)', id: null };
+        hooksSnap[t] = { before: fn.beforeExe.map(describe), after: fn.afterExe.map(describe) };
+      }
+      const cfg = getConfig();
+      return JSON.stringify(
+        {
+          systemPrompt: getSystemPrompt(),
+          hooks: hooksSnap,
+          tools: executor.list(true).map((t) => ({ name: t.name, author: t.author, hasCall: typeof t.call === 'function' })),
+          engine: { model: cfg.model, baseURL: cfg.baseURL },
+        },
+        null,
+        2,
+      );
+    }
+    if (action === 'update') {
+      const ok = await ui.requestApproval({ name: 'orchestrate.update', riskLevel: 'high', code: String(args.systemPrompt ?? '') });
+      if (!ok) return '已取消';
+      const sp = String(args.systemPrompt ?? '');
+      if (!sp) return 'systemPrompt 不能为空';
+      storage.set('config', 'systemPrompt', sp);
+      // 热生效：替换 agent.messages 里 role=system 那条（有则改，无则 unshift），当下会话即应用
+      const msgs = ctx.agent.messages;
+      const i = msgs.findIndex((m: any) => m.role === 'system');
+      if (i >= 0) msgs[i] = { ...msgs[i], content: sp };
+      else msgs.unshift({ role: 'system', content: sp });
+      return '已更新系统提示并热生效（当下会话即应用）';
+    }
+    if (action === 'addHook') {
+      const codeStr = String(args.code ?? '');
+      const ok = await ui.requestApproval({ name: 'orchestrate.addHook', riskLevel: 'high', code: codeStr });
+      if (!ok) return '已取消';
+      const target = resolveTarget(String(args.target ?? ''), ctx.agent);
+      if (!target) return `未知 target: ${args.target}（可选: ${HOOK_TARGETS.join('/')}）`;
+      const phase = String(args.phase ?? 'before');
+      if (phase !== 'before' && phase !== 'after') return 'phase 必须为 before/after';
+      const name = String(args.name ?? 'userHook');
+      const id = 'h-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+      let wrapped: ((opts: any) => void) & Record<string, unknown>;
+      try {
+        wrapped = compileHook(codeStr, name, ctx.agent);
+      } catch (e) {
+        return `钩子代码编译失败: ${e instanceof Error ? e.message : String(e)}`;
+      }
+      wrapped.__hookId = id;
+      (target as any)[phase + 'Exe'].push(wrapped);
+      storage.set('hooks', id, { id, name, target: String(args.target), phase, code: codeStr });
+      return `已挂接用户钩子 ${name} → ${args.target}.${phase}（id=${id}），刷新不丢`;
+    }
+    if (action === 'removeHook') {
+      const id = String(args.hookId ?? '');
+      const name = String(args.name ?? '');
+      if (!id && !name) return 'removeHook 需提供 hookId 或 name（按 name 移除所有同名用户钩子）';
+      const ok = await ui.requestApproval({ name: 'orchestrate.removeHook', riskLevel: 'high', code: id || name });
+      if (!ok) return '已取消';
+      // 回收：同时按 hookId / name 在所有钩子目标里移除匹配的用户钩子（core 钩子不可经此移除）
+      let removed = 0;
+      for (const t of HOOK_TARGETS) {
+        const fn = resolveTarget(t, ctx.agent);
+        if (!fn) continue;
+        for (const phase of ['before', 'after'] as const) {
+          const arr = (fn as any)[phase + 'Exe'] as any[];
+          for (let i = arr.length - 1; i >= 0; i--) {
+            const f = arr[i];
+            const match = (id && f.__hookId === id) || (name && f.__userHook && f.__name === name);
+            if (match) { arr.splice(i, 1); removed++; }
+          }
+        }
+      }
+      // 同步清理持久化（hooks 命名空间）
+      if (id) storage.del('hooks', id);
+      else if (name) {
+        for (const hid of storage.keys('hooks')) {
+          const d = storage.get<{ name?: string }>('hooks', hid);
+          if (d && d.name === name) storage.del('hooks', hid);
+        }
+      }
+      return removed ? `已移除 ${removed} 个钩子（id=${id || '-'} name=${name || '-'}）` : `未找到匹配钩子（id=${id || '-'} name=${name || '-'}）`;
+    }
+    return '未知 action: ' + action;
   },
 };
 
@@ -692,12 +914,12 @@ const sessionTool: ToolDef = {
   },
 };
 
-// 默认工具清单（统一能力面）：领域工具 + 自开发工具 + 系统编排原语。
-// 全部由 agent.init() 注册；orchestrate_send 无 call（不进 LLM 日常载荷，但 tool_manager 可见）。
+// 默认工具清单（统一能力面）：领域工具 + 自开发工具 + 系统编排管理。
+// 全部由 agent.init() 注册；orchestrate 带 call（进 LLM 日常载荷，供自我编排查看/热更新运行期钩子与系统提示）。
 export const defaultTools: ToolDef[] = [
   gmStorageTool,
   codeRunTool,
   toolManagerTool,
-  orchestrateSendTool,
+  orchestrateTool,
   sessionTool,
 ];
