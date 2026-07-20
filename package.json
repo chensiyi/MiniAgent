@@ -7,7 +7,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "release": "vite build && vite preview --open /miniagent.user.js",
+    "dev:release": "vite build && vite preview"
   },
   "dependencies": {
     "@sec-ant/gm-fetch": "^1.1.0"

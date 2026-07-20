@@ -70,7 +70,7 @@ export const llm = {
   // 核心：流式调用 /chat/completions。逐行解析 SSE，yield 文本/思考/工具增量；结束 return 完整 ChatResult。
   streamChat: withHooks(async function* (opts: ChatOptions): AsyncGenerator<ChatChunk> {
     const { apiKey, model, baseURL } = getConfig();
-    if (!apiKey) throw new Error('未配置 API Key：请在 src/model/config.ts 填写 apiKey');
+    if (!apiKey) throw new Error('未配置 API Key：请输入 /storage_set /ns default /key config /update true /value {"apiKey":"你的Key","baseURL":"https://openrouter.ai/api/v1","model":"openrouter/free"}');
 
     const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
     const body: Record<string, unknown> = {

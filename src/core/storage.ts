@@ -60,6 +60,6 @@ export const storage = {
   },
 };
 
-storage.set.afterExe.push(() => {
-  bus.emit('storage:changed');
+storage.set.afterExe.push((opts) => {
+  bus.emit('storage:changed', { ns: opts.args[0], key: opts.args[1] }); // 跨标签页广播：订阅者可定向刷新 {ns,key}
 });

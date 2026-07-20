@@ -321,15 +321,6 @@ export const executor = {
     }
   }),
 
-  // 批量执行（工具循环用）：依次 run，返回各观察结果
-  runLoop: withHooks(async (calls: ToolCall[], agentArg?: AgentLike): Promise<string[]> => {
-    const results: string[] = [];
-    for (const call of calls) {
-      results.push(await executor.run(call, agentArg));
-    }
-    return results;
-  }),
-
   // 重建自编排工具：读 tools 命名空间全部描述符 → 过滤启用项 → 构造 ToolDef → registerAll（拓扑序）。
   // 没有独立的 rehydrate 例程：重建逻辑天然写在各工具的 register 里，注册即重建。
   rehydrateTools(): void {
@@ -384,17 +375,18 @@ const storageGetTool: ToolDef = {
   },
 };
 
-// 2) 写入存储（默认 memory 命名空间，可指定其它）
+// 2) 写入存储（默认 memory 命名空间，可指定其它；update=true 时合并已有值）
 const storageSetTool: ToolDef = {
   name: 'storage_set',
   author: 'core',
-  description: '写入一个键值到持久存储（默认 memory 命名空间）。可用于保存记忆、配置、偏好。',
+  description: '写入一个键值到持久存储（默认 memory 命名空间）。可用于保存记忆、配置、偏好。update=true 时合并已有对象。',
   inputSchema: {
     type: 'object',
     properties: {
       key: { type: 'string', description: '键名' },
       value: { type: 'string', description: '要保存的值（建议 JSON 字符串）' },
       ns: { type: 'string', description: '可选命名空间，默认 memory' },
+      update: { type: 'boolean', description: '合并模式：读取已有值并合并（对象 merge，其余覆盖）' },
     },
     required: ['key', 'value'],
   },
@@ -402,6 +394,15 @@ const storageSetTool: ToolDef = {
     const key = String(args.key ?? '');
     if (!key) return '参数 key 缺失';
     const ns = String(args.ns ?? 'memory');
+    if (args.update) {
+      const existing = ctx.storage.get(ns, key) ?? {};
+      const incoming = args.value;
+      const merged = typeof existing === 'object' && existing && typeof incoming === 'object' && incoming
+        ? { ...(existing as Record<string, unknown>), ...(incoming as Record<string, unknown>) }
+        : incoming;
+      ctx.storage.set(ns, key, merged);
+      return `已合并保存 ${ns}:${key}`;
+    }
     ctx.storage.set(ns, key, args.value);
     return `已保存 ${ns}:${key}`;
   },

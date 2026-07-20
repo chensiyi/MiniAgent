@@ -178,9 +178,80 @@ function init(): void {
 }
 init();
 
+// ---- 用户直接调用工具：/tool_name /param value /flag ----
+
+// 解析 /tool_name /param1 value1 /param2 value2 /flag 语法 → { name, args }
+// 值支持引号包裹、JSON 对象/数组、布尔、数字；/flag 无值时视为 true
+function parseToolCommand(text: string): { name: string; args: Record<string, unknown> } | null {
+  const body = text.slice(1).trim();
+  const sp = body.search(/\s/);
+  const name = sp === -1 ? body : body.slice(0, sp);
+  let rest = sp === -1 ? '' : body.slice(sp + 1);
+
+  const args: Record<string, unknown> = {};
+  while (rest.trim()) {
+    rest = rest.trimStart();
+    if (!rest.startsWith('/')) break;
+    rest = rest.slice(1);
+    const sp2 = rest.search(/\s/);
+    if (sp2 === -1) { args[rest] = true; break; } // flag: /verbose → true
+    const key = rest.slice(0, sp2);
+    rest = rest.slice(sp2 + 1).trimStart();
+    // 读值：引号包裹 → 到匹配引号；否则到下一个 /param（空格+/）
+    let val: string;
+    if (rest[0] === '"' || rest[0] === "'") {
+      const q = rest[0];
+      const close = rest.indexOf(q, 1);
+      val = close === -1 ? rest.slice(1) : rest.slice(1, close);
+      rest = close === -1 ? '' : rest.slice(close + 1);
+    } else {
+      const next = rest.search(/\s\/(?=\S)/);
+      if (next === -1) { val = rest; rest = ''; }
+      else { val = rest.slice(0, next); rest = rest.slice(next); }
+    }
+    // 尝试 JSON 解析（对象/数组）
+    if ((val.startsWith('{') && val.endsWith('}')) || (val.startsWith('[') && val.endsWith(']'))) {
+      try { args[key] = JSON.parse(val); continue; } catch { /* 保持字符串 */ }
+    }
+    if (val === 'true') args[key] = true;
+    else if (val === 'false') args[key] = false;
+    else args[key] = val;
+  }
+  return { name, args };
+}
+
+// 执行工具命令（绕过 LLM）：解析 → executor.run → 显示结果
+async function handleToolCommand(text: string): Promise<void> {
+  const parsed = parseToolCommand(text);
+  if (!parsed) { ui.chat.append('tool', '⚠️ 无法解析命令'); return; }
+  const exists = executor.list(true).some((t) => t.name === parsed.name);
+  if (!exists) { ui.chat.append('tool', `⚠️ 未找到工具：${parsed.name}`); return; }
+  ui.chat.append('tool', `⚙ ${parsed.name}: 执行中…`);
+  const obs = await executor.run(
+    { id: 'cmd-' + Date.now().toString(36), name: parsed.name, args: parsed.args },
+    agent,
+  );
+  ui.chat.updateLast('tool', `⚙ ${parsed.name}: ${obs}`);
+}
+
+// 配置不完整时的提示文案
+const CONFIG_HINT = '⚠️ 未配置 API Key。请先设置：\n输入 /storage_set /ns default /key config /update true /value {"apiKey":"你的Key","baseURL":"https://openrouter.ai/api/v1","model":"openrouter/free"}';
+
 // 挂载 UI（用户消息 → agent.sendMessage）
 function mount(): void {
   ui.chat.mount((text) => {
+    // 用户直接调用工具：/tool_name /param value
+    if (text.startsWith('/')) {
+      ui.chat.append('user', text);
+      void handleToolCommand(text);
+      return;
+    }
+    // 配置检查：apiKey 未配置时提示用户通过工具命令设置
+    if (!getConfig().apiKey) {
+      ui.chat.append('user', text);
+      ui.chat.append('tool', CONFIG_HINT);
+      return;
+    }
     void agent.sendMessage(text);
   });
 }
