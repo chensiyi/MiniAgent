@@ -1,4 +1,4 @@
-import { llm, type ChatMessage, type ToolCallLite, type ChatRequestBody } from './core/llm';
+import { llm, type ChatMessage, type ToolCallLite, type ChatRequestBody, type ChatResult, type ChatChunk } from './core/llm';
 import { executor, defaultTools, extraBuiltinTools, type ToolCall, type ToolDef } from './core/executor';
 import { storage } from './core/storage';
 import { ui } from './ui/ui';
@@ -92,9 +92,6 @@ export const agent = {
           // assistant 占位气泡：流式逐字更新依赖 lastAssistantEl，必须先建
           agent.output.append('assistant', '');
 
-          // 流式累积（文本逐字更新、工具调用按 index 合并）
-          let content = '', reasoning = '';
-          const acc: Record<number, { id: string; name: string; args: string }> = {};
           // 构建请求体：baseRequestBody 模板（编排可热更新）+ config.model 兜底；
           // messages/stream/tools 经此请求体传入；before 钩子可编辑（streamChat.before 改 opts.args[0]）。
           const tools = executor.list(); // 仅非 hidden 工具进 LLM 载荷
@@ -111,7 +108,14 @@ export const agent = {
             }));
             body.tool_choice = 'auto';
           }
-          for await (const chunk of llm.streamChat(body)) {
+
+          // 手动驱动迭代器：逐块更新 UI，结束(done)时 r.value 即 streamChat 的 return（完整 ChatResult）。
+          // 以 return 的 toolCalls 为权威真相源，消除与引擎内累加器双重累积的漂移风险。
+          const it = llm.streamChat(body);
+          let r = await it.next();
+          let content = '', reasoning = '';
+          while (!r.done) {
+            const chunk = r.value as ChatChunk;
             if (chunk.delta) {
               content += chunk.delta;
               agent.output.updateLast('assistant', content, reasoning);
@@ -120,25 +124,16 @@ export const agent = {
               reasoning += chunk.reasoning;
               agent.output.updateLast('assistant', content, reasoning);
             }
-            if (chunk.toolCall) {
-              const i = chunk.toolCall.index ?? 0;
-              acc[i] ??= { id: '', name: '', args: '' };
-              if (chunk.toolCall.id) acc[i].id = chunk.toolCall.id;
-              if (chunk.toolCall.name) acc[i].name = chunk.toolCall.name;
-              if (chunk.toolCall.arguments) acc[i].args += chunk.toolCall.arguments;
-            }
+            r = await it.next();
           }
+          const final = (r.value ?? { content: '', toolCalls: [] }) as ChatResult;
+          const toolCalls: ToolCallLite[] = final.toolCalls;
           agent.output.finalizeLast('assistant', content, reasoning || undefined);
-
-          const toolCalls: ToolCallLite[] = Object.values(acc).map((t) => ({
-            id: t.id,
-            type: 'function',
-            function: { name: t.name, arguments: t.args },
-          }));
 
           agent.messages.push({
             role: 'assistant',
             content,
+            reasoning_content: reasoning || undefined, // 写回思考链，供后续轮次（含工具循环）保留上下文
             tool_calls: toolCalls.length ? toolCalls : undefined,
           } as ChatMessage);
 
@@ -180,6 +175,10 @@ export const agent = {
   },
 };
 
+// 迟绑 thisArg：engine / sendMessage 体内 this 指向 agent（局部上下文），避免 TDZ。
+(agent.engine as unknown as { __thisArg?: unknown }).__thisArg = agent;
+(agent.sendMessage as unknown as { __thisArg?: unknown }).__thisArg = agent;
+
 // Agent 类型（供 executor 的 RunCtx/RegisterCtx 使用，类型引用避免运行时循环依赖）
 export type Agent = typeof agent;
 
@@ -189,77 +188,18 @@ function orchestrateSystemPrompt(): void {
   const sys = getSystemPrompt();
   if (sys) agent.messages.unshift({ role: 'system', content: sys } as ChatMessage);
 }
+Object.assign(orchestrateSystemPrompt, { __coreHook: true, __name: '系统提示注入', __hookId: 'sys-prompt-inject' });
 agent.sendMessage.beforeExe.push(orchestrateSystemPrompt);
 
 // 运行态钩子：消息处理开始（点击发送那一刻）→ 发送按钮变身停止按钮（用户要求"通过 hook"）
-agent.sendMessage.beforeExe.push(() => agent.output.setRunning(true, agent.chatStop));
+const setRunningHook = () => agent.output.setRunning(true, agent.chatStop);
+Object.assign(setRunningHook, { __coreHook: true, __name: '运行态切换', __hookId: 'sys-running-toggle' });
+agent.sendMessage.beforeExe.push(setRunningHook);
 
 // 基本初始化（进工作循环前的一次性 bootstrap，属架构铁律允许的顶层副作用）：
 // ① 旧扁平 config → default:config 迁移；② 种子默认配置（无内容也落盘）；
 // ③ 绑定 agent 引用；④ 注册默认工具（→ 各 onRegister，含 session 落盘安装）；
 // ⑤ 重建持久化的自编排工具（→ onRegister 重建）。
-// 外部库加载（仅用于"智能体自身的聊天 markdown 渲染"，非工具行为）：
-// marked / DOMPurify 经"外部 JS"引入（用户要求引用外部 js，而非内联打包）。
-// 工具自身的依赖请用 tool_manager register 的 /libs 参数在安装期 fetch 并内联（自包含），不走这里。
-// 本函数默认源 jsDelivr（用户指定"默认用 jsDelivr 外国 CDN"），并附国内镜像兜底（聊天渲染无"安装"步骤、需随启动就绪）。
-// 执行时用 new Function 隔离作用域、屏蔽 module/exports/define 形参，迫使 UMD 走
-// (globalThis).<lib>={} 兜底分支把库挂到沙箱全局，供 tools/marked.ts 的 renderMarkdown 使用。
-function ensureExternalLibs(): void {
-  const g = globalThis as unknown as Record<string, any>;
-  const gmx = (globalThis as any).GM_xmlhttpRequest;
-  if (typeof gmx === 'undefined') {
-    console.warn('[MiniAgent] 无 GM_xmlhttpRequest，外部库无法加载，渲染将回退转义文本');
-    return;
-  }
-  // 来源优先级：本地 vendor 第一（零外网依赖），其次国内镜像，最后 jsDelivr
-  const SOURCES: Record<string, string[]> = {
-    marked: [
-      'https://cdn.jsdelivr.net/npm/marked@12/marked.min.js',
-      'https://registry.npmmirror.com/marked/12.0.2/files/marked.min.js',
-      'https://cdn.bootcdn.net/ajax/libs/marked/12.0.2/marked.min.js',
-      'https://lib.baomitu.com/marked/12.0.2/marked.min.js',
-    ],
-    DOMPurify: [
-      'https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js',
-      'https://registry.npmmirror.com/dompurify/3.1.6/files/dist/purify.min.js',
-      'https://cdn.bootcdn.net/ajax/libs/dompurify/3.1.6/purify.min.js',
-      'https://lib.baomitu.com/dompurify/3.1.6/purify.min.js',
-    ],
-  };
-  const fetchText = (url: string): Promise<string> =>
-    new Promise((resolve, reject) => {
-      gmx({
-        method: 'GET',
-        url,
-        onload: (r: { responseText: string; status: number }) =>
-          r.status >= 200 && r.status < 300 ? resolve(r.responseText) : reject(new Error('HTTP ' + r.status)),
-        onerror: () => reject(new Error('network')),
-      });
-    });
-  const tryLoad = async (globalName: string, urls: string[]): Promise<void> => {
-    if (typeof g[globalName] !== 'undefined') {
-      console.log(`[MiniAgent] 外部库 ${globalName} 已存在，跳过加载`);
-      return;
-    }
-    for (const url of urls) {
-      try {
-        const src = await fetchText(url);
-        // 隔离作用域：屏蔽 module/exports/define，迫使 UMD 走 (globalThis).<lib>={} 兜底分支
-        new Function('module', 'exports', 'define', src)(undefined, undefined, undefined);
-        if (typeof g[globalName] !== 'undefined') {
-          console.log(`[MiniAgent] 外部库 ${globalName} 加载成功：${url}`);
-          return;
-        }
-      } catch (e) {
-        console.warn(`[MiniAgent] 外部库 ${globalName} 来源失败：${url}`, e instanceof Error ? e.message : e);
-      }
-    }
-    console.warn(`[MiniAgent] 外部库 ${globalName} 全部来源失败，渲染将回退转义文本`);
-  };
-  void tryLoad('marked', SOURCES.marked);
-  void tryLoad('DOMPurify', SOURCES.DOMPurify);
-}
-
 // ---- UI 作为 tool（§11：核心可无 UI 运行；UI 是工具清单里一个可禁用/启用的 tool）----
 // register：挂载聊天界面 + 接管输出槽/渲染/确认闸；unregister：卸载 DOM + 还原 headless。
 // 关闭界面 = 在 ⚙ 工具清单禁用 ui 工具（经确认闸、可逆），核心照常 headless 运行；
@@ -349,7 +289,6 @@ function init(): void {
   executor.rehydrateHooks(agent); // 重建用户钩子（热插拔，刷新不丢）
 }
 init();
-ensureExternalLibs(); // 兜底加载 marked/DOMPurify 到沙箱全局（fire-and-forget，保证裸全局可用）
 
 // ---- 用户直接调用工具：/tool_name /param value /flag ----
 

@@ -1,5 +1,5 @@
 import gmFetch from '@sec-ant/gm-fetch';
-import { getConfig, getBaseRequestBody } from '../model/config';
+import { getConfig } from '../model/config';
 import { withHooks } from './withHooks';
 
 export type ChatRole = 'user' | 'assistant' | 'system' | 'tool';
@@ -11,6 +11,8 @@ export interface ChatMessage {
   tool_calls?: ToolCallLite[];
   tool_call_id?: string;
   name?: string;
+  // 思考链：写回历史，供后续轮次（含工具循环）保留推理上下文
+  reasoning_content?: string;
 }
 
 // 流式输出的一个分片：文本增量 / 思考链增量 / 工具调用增量 / 结束标记
@@ -28,21 +30,22 @@ export interface ToolCallLite {
   function: { name: string; arguments: string };
 }
 
-// 喂给 API 的工具声明（OpenAI tool schema 子集）
-export interface ToolLite {
-  name: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
+// 请求体里的 tools 字段格式（API 包装形态）
+export interface ApiTool {
+  type: 'function';
+  function: { name: string; description: string; inputSchema: Record<string, unknown> };
 }
 
-// 请求参数（对齐 webagentcli ProviderAPIServices 的 request）
-export interface ChatOptions {
+// 请求体：调用方构建并传入 streamChat。含 messages / stream / tools，以及模型参数（model / temperature /
+// max_tokens / reasoning_effort 及厂商扩展字段 top_p / response_format …）。编排钩子（streamChat.before）
+// 通过 opts.args[0] 拿到这份请求体并可直接编辑（改 messages / tools / model / 温度等）。
+export interface ChatRequestBody {
   messages: ChatMessage[];
-  tools?: ToolLite[];
-  signal?: AbortSignal; // 调用方自带中止（保留）
-  temperature?: number; // NEW
-  maxTokens?: number; // NEW → max_tokens
-  reasoningEffort?: 'none' | 'low' | 'medium' | 'high' | string; // NEW → reasoning_effort
+  stream?: boolean;
+  tools?: ApiTool[];
+  tool_choice?: string | Record<string, unknown>;
+  model?: string;
+  [key: string]: unknown; // 厂商扩展字段（temperature / max_tokens / reasoning_effort / top_p …）
 }
 
 // 返回结果（对齐 StandardResponse：content / reasoning_content / toolCalls / finishReason / usage / model）
@@ -68,33 +71,21 @@ export const llm = {
   },
 
   // 核心：流式调用 /chat/completions。逐行解析 SSE，yield 文本/思考/工具增量；结束 return 完整 ChatResult。
-  streamChat: withHooks(async function* (opts: ChatOptions): AsyncGenerator<ChatChunk> {
-    const { apiKey, model, baseURL } = getConfig();
+  // 入参 body 为已构建的请求体（messages/stream/tools + 模型参数），由调用方组装（含 baseRequestBody 模板
+  // 与 config.model 兜底）。before 钩子可在请求发出前编辑 body（messages/tools/model/温度等）。
+  streamChat: withHooks(async function* (body: ChatRequestBody): AsyncGenerator<ChatChunk> {
+    const { apiKey, baseURL } = getConfig();
     if (!apiKey) throw new Error('未配置 API Key：请输入 /gm_storage /action set /ns default /key config /update true /value {"apiKey":"你的Key","baseURL":"https://openrouter.ai/api/v1","model":"openrouter/free"}');
 
     const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
-    // baseRequestBody：编排可热更新的请求模板（每轮合并；可被显式 opts 覆盖）。
-    // model 允许被模板覆盖，但 messages/stream 始终由运行期填充，模板无法破坏它们。
-    const base = getBaseRequestBody();
-    const body: Record<string, unknown> = { ...base };
-    body.model = (typeof base.model === 'string' && base.model) ? base.model : model;
-    body.messages = opts.messages;
+    // body 已由调用方构建（含 messages/stream/tools + baseRequestBody + config.model 兜底）。
+    // 此处仅做必要兜底与锁定：messages 保底空数组、stream 强制 true（SSE 解析要求）。
+    body.messages = body.messages ?? [];
     body.stream = true;
-    if (opts.tools?.length) {
-      body.tools = opts.tools.map((t) => ({
-        type: 'function',
-        function: { name: t.name, description: t.description, inputSchema: t.inputSchema },
-      }));
-      body.tool_choice = 'auto';
-    }
-    // 仅当显式提供才下发（不猜测推理模型）
-    if (opts.temperature != null) body.temperature = opts.temperature;
-    if (opts.maxTokens != null) body.max_tokens = opts.maxTokens;
-    if (opts.reasoningEffort != null) body.reasoning_effort = opts.reasoningEffort;
 
-    // 内部 AbortController：支持 llm.cancel()；外部 signal 优先
+    // 内部 AbortController：支持 llm.cancel()
     llm._abort = new AbortController();
-    const signal = opts.signal ?? llm._abort.signal;
+    const signal = llm._abort.signal;
 
     const res = await gmFetch(url, {
       method: 'POST',
@@ -160,7 +151,9 @@ export const llm = {
         }
         if (delta.tool_calls) {
           for (const tc of delta.tool_calls as any[]) {
-            const i = tc.index ?? 0;
+            // 缺失 index 时分配到下一空槽（而非强并到 0），避免多个工具调用被错误合并
+            let i = tc.index;
+            if (i == null) i = Object.keys(acc).length;
             acc[i] ??= { id: '', name: '', args: '' };
             if (tc.id) acc[i].id = tc.id;
             if (tc.function?.name) acc[i].name = tc.function.name;
@@ -190,10 +183,14 @@ export const llm = {
   }),
 
   // 收集完整结果：手动驱动迭代器以捕获 return 的完整 ChatResult（含 reasoningContent/finishReason/usage/model）
-  chat: withHooks(async (opts: ChatOptions): Promise<ChatResult> => {
-    const it = llm.streamChat(opts);
+  chat: withHooks(async (body: ChatRequestBody): Promise<ChatResult> => {
+    const it = llm.streamChat(body);
     let r = await it.next();
     while (!r.done) r = await it.next();
     return (r.value ?? { content: '', toolCalls: [] }) as ChatResult;
   }),
 };
+
+// 迟绑 thisArg：使 streamChat / chat 体内 this 指向 llm（局部上下文），避免在其自身初始化器里引用自身导致 TDZ。
+(llm.streamChat as unknown as { __thisArg?: unknown }).__thisArg = llm;
+(llm.chat as unknown as { __thisArg?: unknown }).__thisArg = llm;

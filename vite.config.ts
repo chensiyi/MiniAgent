@@ -30,7 +30,8 @@ const version = `${pkg.version}.${buildStamp}`;
 const updateURL = 'http://localhost:4173/miniagent.user.js';
 
 // MiniAgent 构建配置（极简版）：纯原生 TS + 手写 DOM，无 React / antd / langchain / 任何框架
-// markdown 渲染交给外部引入的 marked（运行时经 GM_xmlhttpRequest 主动拉取，不内联进产物），并由 DOMPurify 清洗 XSS
+// markdown 渲染交给外部引入的 marked / DOMPurify：通过 @require 在安装期由 Tampermonkey 拉取并缓存
+// （不内联进产物、不占脚本体体积；运行时直接读隔离世界全局，无跨世界/网络问题），并由 DOMPurify 清洗 XSS
 export default defineConfig({
   plugins: [
     monkey({
@@ -48,6 +49,12 @@ export default defineConfig({
           ...(isDevBranch ? (['unsafeWindow'] as const) : []),
         ],
         connect: ['*'], // 直连 LLM 域名（动态）；后续脚本管理可收敛
+        // 核心渲染库经 @require 引入：安装期由 Tampermonkey 拉取并缓存（一次），运行时直接读隔离世界全局。
+        // 仅外国 CDN（用户要求"用国外的"）；不内联进产物、不占脚本体、无跨世界问题。
+        require: [
+          'https://cdn.jsdelivr.net/npm/marked@12/marked.min.js',
+          'https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js',
+        ],
         downloadURL: updateURL,
         updateURL,
       },

@@ -13,9 +13,9 @@ export const requestApproval = withHooks(async function (
   const ext = agentRef && (agentRef as unknown as { extensions?: Map<string, unknown> }).extensions;
   const fn = ext && typeof ext.get === 'function' ? ext.get('approval') : null;
   if (typeof fn === 'function') return (fn as (c: { name: string; code?: string; riskLevel?: string }) => Promise<boolean>)(call);
-  console.warn(`[MiniAgent] 无审批闸（UI 未挂载），自动放行：${call.name}`);
-  return true;
-});
+      console.warn(`[MiniAgent] 无审批闸（UI 未挂载），自动放行：${call.name}`);
+      return true;
+    });
 
 // executor 的结构化视图（避免 typeof executor 前向引用）
 export interface ExecutorLike {
@@ -117,6 +117,8 @@ const registry = new Map<string, ToolDef>();
 let _agent: AgentLike | null = null;
 
 // 把源码串编译成函数（call / register / unregister 共用沙箱编译）。剥离末尾分号避免语法错误。
+// 注：exportToolToJs 内联的 buildFn 复用同一编译表达式 new Function('"use strict"; return (' + c + ');')，
+// 两处刻意平行（不抽公共 helper），保持"运行期编译"与"导出可重注册片段"对称可读。
 function compileFn(code: string): (...a: any[]) => any {
   const c = code.trim().replace(/;\s*$/, '');
   const fn = new Function('"use strict"; return (' + c + ');');
@@ -141,32 +143,64 @@ export function buildToolFromDesc(desc: ToolDesc): ToolDef {
 }
 
 // ---- 安装期依赖库 fetch（工具自包含机制）----
-// 设计：工具可在 register 时声明依赖的外部 JS 库（默认 jsDelivr 外国 CDN），
+// 设计：工具可在 register 时声明依赖的外部 JS 库（默认外国 CDN 链：jsDelivr / unpkg / cdnjs，用户要求"用国外的"），
 // 安装期 fetch 源码并"用内容替换自己"——把库源码内联进工具自身的 code（包成 IIFE 表达式），
 // 自此该工具完全自包含、离线可用：不依赖运行时全局、不靠 @require 修改用户脚本头、不打包进产物。
-// 解析规则（resolveLibUrl）：完整 URL 原样用；已知别名 marked/dompurify 展开为 jsDelivr 地址；
-// 其余形如 marked@12/marked.min.js 的 spec 默认拼 https://cdn.jsdelivr.net/npm/<spec>。
-const KNOWN_LIBS: Record<string, string> = {
-  marked: 'https://cdn.jsdelivr.net/npm/marked@12/marked.min.js',
-  dompurify: 'https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js',
+// 解析规则（resolveLibUrls）：完整 URL 原样返回单源；已知别名 marked/dompurify 展开为多源兜底链；
+// 其余形如 marked@12/marked.min.js 的 spec 默认拼外国 CDN 链（jsDelivr / unpkg / cdnjs）。
+const KNOWN_LIBS: Record<string, string[]> = {
+  marked: [
+    'https://cdn.jsdelivr.net/npm/marked@12/marked.min.js',
+    'https://unpkg.com/marked@12/marked.min.js',
+    'https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js',
+  ],
+  dompurify: [
+    'https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js',
+    'https://unpkg.com/dompurify@3/dist/purify.min.js',
+    'https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js',
+  ],
 };
-function resolveLibUrl(spec: string): string {
+function resolveLibUrls(spec: string): string[] {
   const s = spec.trim();
-  if (/^https?:\/\//i.test(s)) return s; // 完整 URL：原样使用（支持任意镜像）
-  if (KNOWN_LIBS[s]) return KNOWN_LIBS[s]; // 已知别名
-  return 'https://cdn.jsdelivr.net/npm/' + s; // 默认 jsDelivr
+  if (/^https?:\/\//i.test(s)) return [s]; // 完整 URL：原样使用（支持任意镜像）
+  if (KNOWN_LIBS[s]) return KNOWN_LIBS[s]; // 已知别名 → 多源兜底链
+  return [
+    'https://cdn.jsdelivr.net/npm/' + s,
+    'https://unpkg.com/' + s,
+    'https://cdnjs.cloudflare.com/ajax/libs/' + s,
+  ]; // 默认外国 CDN 链
 }
-// 用 GM_xmlhttpRequest（脚本已授予）拉取库源码；失败 reject，由调用方中断安装并提示。
-function fetchLibText(url: string): Promise<string> {
-  const gmx = (globalThis as any).GM_xmlhttpRequest;
-  if (typeof gmx !== 'function') return Promise.reject(new Error('GM_xmlhttpRequest 不可用（脚本未授予该权限）'));
-  return new Promise<string>((resolve, reject) => {
+// 单个 URL 加载：优先页面原生 fetch（jsDelivr 开启 CORS，跨域 GET 无需 @connect 授权，规避 GM_xmlhttpRequest 被拦），
+// 失败再退回 GM_xmlhttpRequest。返回源码文本。
+function loadLibText(url: string): Promise<string> {
+  const g = globalThis as any;
+  const viaXhr = () => new Promise<string>((resolve, reject) => {
+    const gmx = g.GM_xmlhttpRequest;
+    if (typeof gmx !== 'function') { reject(new Error('GM_xmlhttpRequest 不可用（脚本未授予该权限）')); return; }
     gmx({
       method: 'GET',
       url,
       onload: (r: any) => (r.status >= 200 && r.status < 300 ? resolve(r.responseText) : reject(new Error('HTTP ' + r.status))),
       onerror: () => reject(new Error('网络错误（无法访问 CDN）')),
     });
+  });
+  if (typeof g.fetch === 'function') {
+    return g.fetch(url, { redirect: 'follow' })
+      .then((res: any) => (res.ok ? res.text() : Promise.reject(new Error('HTTP ' + res.status))))
+      .catch(() => viaXhr());
+  }
+  return viaXhr();
+}
+// urls 为兜底链，依次尝试（每源优先 fetch 后 GM_xmlhttpRequest），任一成功即返回；全部失败 reject。
+export function fetchLibText(urls: string[]): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    let idx = 0;
+    const tryNext = () => {
+      if (idx >= urls.length) { reject(new Error('所有 CDN 来源均失败')); return; }
+      const url = urls[idx++];
+      loadLibText(url).then(resolve, tryNext);
+    };
+    tryNext();
   });
 }
 
@@ -257,6 +291,26 @@ function resolveToolDesc(name: string): ToolDesc | undefined {
     unregister: live.unregister ? live.unregister.toString() : undefined,
     enabled: true,
   } as ToolDesc;
+}
+
+// 删除工具：经用户确认闸后，移除持久化描述符并注销运行期注册；
+// 内置（sys）工具无 tools 命名空间描述符，删除后追加到 disabledTools 黑名单，重载不回注（避免"删了又回来"）。
+// remove / delete 两个 action 共用此实现，语义一致。
+async function deleteTool(name: string, agent: AgentLike): Promise<string> {
+  const confirmed = await requestApproval({ name: `tool_manager.delete(${name})`, riskLevel: 'high' }, agent);
+  if (!confirmed) return '已取消';
+  const persisted = storage.get<ToolDesc>('tools', name);
+  if (persisted) {
+    storage.del('tools', name); // 移除持久化（自编排工具真相源）
+  } else {
+    // 内置工具：无 tools 命名空间描述符 → 追加黑名单，重载不回注
+    const cfg = getConfig();
+    const set = new Set(cfg.disabledTools ?? []);
+    set.add(name);
+    saveConfig({ disabledTools: [...set] });
+  }
+  executor.unregister(name); // 移除运行期注册（含还原其 register/unregister 编排）
+  return `已删除工具 ${name}`;
 }
 
 // 依赖校验（按 name 匹配；缺失→拒绝；author 不符→收集警告但可继续，§5）
@@ -507,6 +561,10 @@ export const executor = {
   },
 };
 
+// 迟绑 thisArg：requestApproval / run 体内 this 指向 executor（局部上下文），避免 TDZ。
+(requestApproval as unknown as { __thisArg?: unknown }).__thisArg = executor;
+(executor.run as unknown as { __thisArg?: unknown }).__thisArg = executor;
+
 // ---- 会话 id 生成（crypto.randomUUID 优先，退化到时间戳+随机）----
 function genSessionId(): string {
   try {
@@ -634,16 +692,16 @@ const codeRunTool: ToolDef = {
 const toolManagerTool: ToolDef = {
   name: 'tool_manager',
   author: 'sys',
-  description: '统一的工具自编排管理。action 取值：register=注册/创建新工具（持久化到 tools 命名空间，重载按依赖拓扑自动重建；code 为 call 源码，register 可选为安装源码；默认停用，enabled=true 立即启用）；remove=删除工具（移除持久化并注销）；list=枚举当前所有已注册工具（含无 call 的系统原语），供查看完整能力面；export=导出工具为可直接注册的 raw JS 代码（控制台粘贴即用）；export_cmd=导出工具为手动安装命令（/tool_manager /action register …，聊天输入框粘贴即用；含 register/unregister 安装钩子的工具不支持，请改用 export）。注：自编排工具导出自包含（含 /libs 内联库）；内置（sys）工具导出的 call 来自函数反编译，可能引用模块内部状态，仅作查看/参考，不保证可独立运行；list_disabled=列出所有已停用的自编排工具。',
+  description: '统一的工具自编排管理。action 取值：register=注册/创建新工具（持久化到 tools 命名空间，重载按依赖拓扑自动重建；code 为 call 源码，register 可选为安装源码；默认停用，enabled=true 立即启用）；remove/delete=删除工具（移除持久化并注销；内置工具删除后加入黑名单，重载不回注）；list=枚举当前所有已注册工具（含无 call 的系统原语），供查看完整能力面；export=导出工具为可直接注册的 raw JS 代码（控制台粘贴即用）；export_cmd=导出工具为手动安装命令（/tool_manager /action register …，聊天输入框粘贴即用；含 register/unregister 安装钩子的工具不支持，请改用 export）。注：自编排工具导出自包含（含 /libs 内联库）；内置（sys）工具导出的 call 来自函数反编译，可能引用模块内部状态，仅作查看/参考，不保证可独立运行；list_disabled=列出所有已停用的自编排工具。',
   inputSchema: {
     type: 'object',
     properties: {
       action: {
         type: 'string',
-        enum: ['register', 'remove', 'list', 'export', 'export_cmd', 'list_disabled'],
-        description: '操作类型：register=创建/注册新工具（持久化到 tools 命名空间，重载按依赖拓扑自动重建；默认停用，enabled=true 立即启用）；remove=删除工具（注销并移除持久化）；list=枚举当前所有已注册工具（含无 call 的系统原语）；export=导出工具为 raw JS 代码（控制台粘贴即用）；export_cmd=导出工具为手动安装命令（/tool_manager /action register …，输入框粘贴即用；含安装钩子的工具不支持）；两者内置（sys）工具的 call 均来自函数反编译，可能引用模块内部状态，仅作查看/参考；list_disabled=列出所有已停用（未启用）的自编排工具。',
+        enum: ['register', 'remove', 'delete', 'list', 'export', 'export_cmd', 'list_disabled'],
+        description: '操作类型：register=创建/注册新工具（持久化到 tools 命名空间，重载按依赖拓扑自动重建；默认停用，enabled=true 立即启用）；remove/delete=删除工具（注销并移除持久化；内置工具删除后加入黑名单，重载不回注）；list=枚举当前所有已注册工具（含无 call 的系统原语）；export=导出工具为 raw JS 代码（控制台粘贴即用）；export_cmd=导出工具为手动安装命令（/tool_manager /action register …，输入框粘贴即用；含安装钩子的工具不支持）；两者内置（sys）工具的 call 均来自函数反编译，可能引用模块内部状态，仅作查看/参考；list_disabled=列出所有已停用（未启用）的自编排工具。',
       },
-      name: { type: 'string', description: '工具名（register/remove/export/export_cmd 必需）。按 name 匹配（注册时与 author 组合成唯一标识）。' },
+      name: { type: 'string', description: '工具名（register/remove/delete/export/export_cmd 必需）。按 name 匹配（注册时与 author 组合成唯一标识）。' },
       author: { type: 'string', description: `可选作者名（默认 "${SYS_AUTHOR}"；与 name 组合唯一；覆盖既有工具即替换，需用户确认）。` },
       description: { type: 'string', description: '工具说明（register 必需），会展示给 LLM 作为该工具的能力描述。' },
       inputSchema: {
@@ -658,7 +716,7 @@ const toolManagerTool: ToolDef = {
       },
       code: { type: 'string', description: 'call 源码（register 必需），签名为 (args, ctx) => string，返回字符串作为工具观察结果回灌 LLM。' },
       register: { type: 'string', description: '可选：安装/重建源码 (ctx) => void（register 用），在工具注册时执行（如挂载钩子、注入编排），重载会自动重建。' },
-      libs: { type: 'string', description: '可选：安装期要内联进工具自身的外部 JS 库，逗号分隔。形如 marked / dompurify（别名）/ marked@12/marked.min.js（jsDelivr 路径）/ 完整 URL。默认源 jsDelivr；每库在安装期 fetch 源码并内联进 code（工具自此自包含、离线可用）。任一库下载失败则中断安装。' },
+      libs: { type: 'string', description: '可选：安装期要内联进工具自身的外部 JS 库，逗号分隔。形如 marked / dompurify（别名）/ marked@12/marked.min.js（CDN 路径）/ 完整 URL。默认外国 CDN 链（jsDelivr / unpkg / cdnjs）；每库在安装期 fetch 源码并内联进 code（工具自此自包含、离线可用）。任一库下载失败则中断安装。' },
       enabled: { type: 'boolean', description: '可选：注册后是否立即启用（进 LLM 工具清单、可被调用）。默认 false（注册后处于停用状态，可在聊天 ⚙ 工具面板或 setEnabled 开启）；传 true 则注册后立即启用。' },
     },
     required: ['action'],
@@ -678,12 +736,12 @@ const toolManagerTool: ToolDef = {
           const specs = libsSpec.split(',').map((s) => s.trim()).filter(Boolean);
           const sources: string[] = [];
           for (const spec of specs) {
-            const url = resolveLibUrl(spec);
+            const urls = resolveLibUrls(spec);
             try {
-              const src = await fetchLibText(url);
-              sources.push('// === 内联依赖库: ' + spec + ' @ ' + url + ' ===\n' + src);
+              const src = await fetchLibText(urls);
+              sources.push('// === 内联依赖库: ' + spec + ' @ ' + urls[0] + ' ===\n' + src);
             } catch (e) {
-              return `依赖库下载失败（${spec} → ${url}）：${e instanceof Error ? e.message : e}\n可改用完整 URL 或可用镜像（如 https://registry.npmmirror.com/...）。`;
+              return `依赖库下载失败（${spec} → ${urls.join(' | ')}）：${e instanceof Error ? e.message : e}\n可改用完整 URL 或可用外国镜像（如 https://unpkg.com/...）。`;
             }
           }
           if (sources.length && code.trim()) {
@@ -719,15 +777,11 @@ const toolManagerTool: ToolDef = {
         const ok = ctx.executor.register(tool);
         return ok ? `已创建工具 ${name}（依赖已内联，已持久化 + 已启用）` : `工具 ${name} 已持久化，但注册被拒（依赖缺失或 author 冲突），仍处于停用状态`;
       }
-      case 'remove': {
+      case 'remove':
+      case 'delete': {
         const name = String(args.name ?? '');
         if (!name) return '参数 name 缺失';
-        // 经用户确认后删除（任何工具均可，含 systool；闸门=用户确认，不再按 author 限制）
-        const confirmed = await requestApproval({ name: `tool_manager.remove(${name})`, riskLevel: 'high' }, ctx.agent);
-        if (!confirmed) return '已取消';
-        ctx.storage.del('tools', name);
-        ctx.executor.unregister(name);
-        return `已移除工具 ${name}`;
+        return deleteTool(name, ctx.agent);
       }
       case 'list': {
         const all = ctx.executor.list(true);
@@ -776,7 +830,7 @@ const toolManagerTool: ToolDef = {
         return '```\n' + cmd + '\n```';
       }
       default:
-        return `未知 action: ${action}（支持 register/remove/list/export/export_cmd/list_disabled）`;
+        return `未知 action: ${action}（支持 register/remove/delete/list/export/export_cmd/list_disabled）`;
     }
   },
 };
@@ -859,11 +913,12 @@ const orchestrateTool: ToolDef = {
           hooksSnap[t] = { before: [], after: [] };
           continue;
         }
-        // 每个钩子带 name + id（user 钩子有 id，core 钩子 id 为 null）——便于编排查看与按名/按 id 回收
-        const describe = (f: any): { name: string; id: string | null } =>
-          f.__userHook
-            ? { name: String(f.__name ?? 'userHook'), id: (f.__hookId as string) ?? null }
-            : { name: '(core)', id: null };
+        // 每个钩子带 name + id（user 钩子有 id，core 钩子也有稳定 id + 可读名）——便于编排查看与按名/按 id 排序
+        const describe = (f: any): { name: string; id: string | null } => {
+          if (f.__userHook) return { name: String(f.__name ?? 'userHook'), id: (f.__hookId as string) ?? null };
+          if (f.__coreHook) return { name: String(f.__name ?? 'system'), id: (f.__hookId as string) ?? null };
+          return { name: '(core)', id: null };
+        };
         hooksSnap[t] = { before: fn.beforeExe.map(describe), after: fn.afterExe.map(describe) };
       }
       const cfg = getConfig();
@@ -1029,6 +1084,7 @@ const sessionTool: ToolDef = {
         }
         ctx.storage.set('session', id, { ...cur, messages: [...ctx.agent.messages] });
       };
+      Object.assign(sessionPersistHook!, { __coreHook: true, __name: '会话落盘', __hookId: 'sys-session-persist' });
       ctx.agent.sendMessage.afterExe.push(sessionPersistHook);
     }
   },

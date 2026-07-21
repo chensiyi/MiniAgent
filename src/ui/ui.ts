@@ -18,9 +18,9 @@ if (_tt) {
 function setHTML(el: Element, html: string): void { el.innerHTML = _hp ? (_hp.createHTML(html) as unknown as string) : html; }
 
 // UI markdown 渲染钩子点：默认用 tools/marked.ts 的 renderMarkdown（依赖全局 marked/DOMPurify，
-// 由 agent.ts 的 ensureExternalLibs 在启动期加载兜底）；渲染型工具（如 marked 工具）可在 register
-// 时经 setMarkdownRenderer 接管，unregister 时经 resetMarkdownRenderer 还原。这样"自动渲染"
-// 由工具自身驱动，核心不依赖某工具，工具离线/卸载即恢复默认渲染器。
+// 二者均由 vite.config 的 @require 编译期注入 userscript 全局作用域，运行期直接消费，无运行时下载）；
+// 渲染型工具（如 marked 工具）可在 register 时经 setMarkdownRenderer 接管，unregister 时经
+// resetMarkdownRenderer 还原。这样"自动渲染"由工具自身驱动，核心不依赖某工具，工具离线/卸载即恢复默认渲染器。
 let markdownRenderer: (text: string) => string = renderMarkdown;
 
 // 玻璃方框浮层（对齐 docs/ui-design.html v4）：容器透明无背景板、无圆角、深色玻璃 + 浅色字、顶部遮罩淡出
@@ -283,7 +283,7 @@ export const ui = {
 
     // 替换 / 恢复 markdown 渲染器（供 marked 等渲染型工具接管 UI 渲染）。
     // setMarkdownRenderer(fn)：fn(text:string)=>string 返回（已清洗的）HTML，接管助手消息与思考渲染。
-    // resetMarkdownRenderer()：恢复默认 renderMarkdown（依赖全局 marked，由 ensureExternalLibs 兜底）。
+    // resetMarkdownRenderer()：恢复默认 renderMarkdown（依赖全局 marked，由 @require 注入）。
     setMarkdownRenderer(fn: (text: string) => string): void {
       markdownRenderer = fn;
     },
@@ -370,3 +370,6 @@ export const ui = {
       bubbles.append(el); bubbles.scrollTop = bubbles.scrollHeight;
     })),
 };
+
+// 迟绑 thisArg：requestApproval 体内 this 指向 ui（局部上下文），避免 TDZ。
+(ui.requestApproval as unknown as { __thisArg?: unknown }).__thisArg = ui;

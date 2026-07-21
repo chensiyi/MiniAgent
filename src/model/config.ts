@@ -59,7 +59,7 @@ export function saveConfig(patch: Partial<AppConfig>): void {
   storage.set('default', 'config', { ...getConfig(), ...patch });
 }
 
-// 引擎动态请求体：合并进每次 streamChat 请求（编排可经 orchestrate.setEngine 热更新，无需重载）。
+// 引擎动态请求体：合并进每次 streamChat 请求（编排可经 orchestrate.setRequestBody 热更新，无需重载）。
 // 与 default:config（端点 / 鉴权：model/baseURL/apiKey）分离——config 管"连哪个"，baseRequestBody 管"怎么问"
 // （temperature / max_tokens / reasoning_effort 及厂商扩展字段，甚至可覆盖 model）。编排因此能"知道并编辑"引擎行为。
 const DEFAULT_BASE_REQUEST_BODY: Record<string, unknown> = {};

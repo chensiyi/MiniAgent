@@ -2,6 +2,20 @@
 
 > 本文档是 MiniAgent 核心架构的权威说明，取代早期随项目迁出、已丢失的设计稿。UI 层见 `docs/ui-design.html`，项目总览见 `README.md`。
 
+## 0. 顶层规范（权威总览，下级章节均服从此节）
+
+> 一切设计、编码、重构都先对齐本节；§13/§14/§17 等是该规范在具体议题上的落地，冲突以本节为准。
+
+1. **范式**：OOP + `withHooks` 钩子工厂；内核极小（Agent=根注册器）；UI 可插拔、核心可 headless 运行。
+2. **解耦铁律**：核心（agent/executor/llm/storage）**绝不 `import` UI 模块**，也不得硬编码 `agent.ui`；UI 能力只经 `agent.extensions.get('KEY')` 发现。UI 是工具清单里一个**可逆**的 tool（关闭=禁用 `ui`，有确认、可重开），绝不永久销毁式关闭。
+3. **外部库二分加载**（§13）：
+   - 核心系统功能库（marked / DOMPurify 等固定基础库）→ 油猴 `@require`，缓存由 Tampermonkey 管理，核心不自己 fetch；
+   - 纯 JS 代码工具（工具自带 `code`、`/libs` 安装期内联的库）→ 脚本世界 `new Function` 自包含（**download→replace→install**，见 §13.2），运行期沙箱、离线可用。
+4. **`noframes` 保留**：`vite.config.ts` 的 `@noframes` 用于**防止页面内多个 iframe 各自加载一份插件实例**（去重），是有意保留，非"修复 runtime.lastError"。
+5. **重大设计先确认再动手**；外部库只用**外国 CDN**（jsDelivr/unpkg/cdnjs）；**不要在项目代码里改 GM grant / 注入策略去"修" Tampermonkey/Chrome MV3 的环境报错**（`Unchecked runtime.lastError: ...` 是官方已知 issue，与本脚本无关）。
+6. **顶层禁写死业务装配副作用**（系统提示/工具清单/运行态/权限走钩子）；bootstrap（seed、UI mount）可留顶层。base 只留最小核心流程。
+7. **工具面闸门=用户确认**：任何工具（含 sys / 第三方）经用户确认即可替换/删除；`SYS_AUTHOR` 仅作默认值，非编辑限制。
+
 ## 1. 设计哲学
 
 - **组合优先**：整合成熟 JS 库与大模型自身智能（推理 + 原生工具调用），直接产出应用，不做框架。
@@ -220,3 +234,138 @@ UI 已实现为内置 tool（`name: 'ui'`）：由 `agent.ts` 定义 `uiTool`（
 - **禁止 `agent.ui` 硬引用**：`ui` 已加入 `executor` 的 `RESERVED`，工具注册不会把 `ui` 挂成 `agent.ui` 属性；UI 能力只经 `agent.extensions` 发现。
 
 > 设计铁律：UI 是工具清单里一个**可逆**的 tool，关闭只是禁用它（有确认、可重开），**绝不**做"一次性 `root.remove()` 后无重开入口"的永久销毁式关闭——否则不人道。
+
+---
+
+## 12. 模块契约与职责（实现级）
+
+> 本节是 §1–§11 设计哲学在源码层的落地契约，逐项对应 `src/` 各模块。架构决策与用户偏好见 §15，已知技术债见 §16。
+
+### 12.1 withHooks 钩子工厂（`src/core/withHooks.ts`）
+- `withHooks(fn, thisArg?)` 把**普通函数**包成"可 hook 的普通函数"：外在签名不变，调用方仍 `fn(...args)` 正常调（无 `.call()`、非 class 实例）。`thisArg` 透传给 `fn.apply(thisArg, ...)`，使被包函数体内 `this` 指向传入的局部上下文（各模块在包时传入自身：`llm`/`executor`/`agent`/`ui`），调用方可经 `this` 快速访问该上下文并进行相关操作。
+- 插槽：`beforeExe` / `afterExe` 为**数组**（编排方 `push`/`insert`/`splice` 精准控序）；单值赋值自动包成数组。`aroundExe`/`onError` 单插槽已弃用（简化版无）。
+- 钩子为 **leaf HookedFunction**（自身不再展开 before/after，避免嵌套）。
+- 钩子上下文 `opts = { args, result }`：before 改 `opts.args`、after 读 `opts.result`。**只读 `opts.args`**，无 `meta`/`context`/`around`/`catch`/`skip`/`replace` 等逃逸口（用户选定"基础函数内处理"，withHooks 保持骨感）。
+- 返回值**严格跟随 base**：async→Promise、sync→原值、生成器直接返回生成器（仅 before 钩子生效）。
+- "替换过程"= 编排阶段把基础函数用 `withHooks` 重新包一层并赋值（组合级替换，如 `agent.sendMessage = withHooks(base)`），而非 per-call skip。base 只留最小核心流程，插入/替换全交钩子。
+- 所有"过程"方法（`sendMessage` / `llm.chat` / `llm.streamChat` / `executor.run`）都用 withHooks 包裹，全系统统一可 hook。
+
+### 12.2 llm 模块（`src/core/llm.ts`）
+- 无状态对象，只持 `config` 属性 + 标准方法 `chat` / `streamChat`，均为 HookedFunction 实例；历史在 `agent.messages`，llm 不持有。
+- 接口（2026-07-21 重构）：`streamChat(body: ChatRequestBody)` / `chat(body)` 直接接收**完整请求体**；`ChatRequestBody = { messages, stream?, tools?: ApiTool[], tool_choice?, model?, [k]: any }`；`ApiTool = { type:'function', function:{ name, description, inputSchema } }`。
+- 内部只从 `getConfig()` 取 `apiKey`/`baseURL`（传输层）；`body.messages` 保底空数组、`body.stream` 锁 `true`（SSE 要求）；**不再**内部拼 model/温度/合并 baseRequestBody（构建移到调用方 `agent.engine`）。
+- SSE 解析：按 `\n` 切物理行；`reasoning_content`/`reasoning` 增量累积 `reasoningContent` 并 yield `{ reasoning }`；`tool_calls` 按 `index` 累积（缺 index 时分配到下一空槽 `Object.keys(acc).length`，防多工具合并）；`usage`/`model`/`finish_reason` 末尾捕获。
+- 首类 `cancel()`：`llm._abort = new AbortController()`，signal 透传 gmFetch；`llm.cancel()` abort 在途。流式 `return` 完整 `ChatResult`（含 `toolCalls/reasoningContent/finishReason/usage/model`）——调用方以 `streamChat` 迭代器 `r.value`（done 时）为权威结果，勿在调用方另起并行累加器（曾因双累加器漂移修复：agent.ts 改手动迭代器消费 return 值）。
+- 参数补齐：`temperature`/`max_tokens`/`reasoning_effort` 仅当调用方显式给才下发；响应补齐 `reasoningContent/finishReason/usage/model`。
+
+### 12.3 executor 模块（`src/core/executor.ts`）
+- `ToolDef = { name, author?, description, inputSchema, deps?, riskLevel?, call?, register?, unregister? }`；`DepRef = { name, author?, version? }`；**唯一标识 = `name+author`**。
+- `register`/`unregister` 触发 `tool.register`/`tool.unregister`（同名先 unregister 再 register）；`registerAll` 先拓扑排序再注册（循环依赖→整体拒绝）；单 `register` 校验依赖（缺失→拒绝，author 不符→警告）。
+- 注册挂 `agent[name]` + `agent.tools`（Map）；`list(includeAll)` 默认返回有 `call` 的（进 LLM 清单），`list(true)` 全量；枚举/存储键/面板输出按**名称字母序**（确定性一致）。
+- `run` 注入 `RunCtx = { storage, executor, agent, this, console }`；确认闸 `riskAtLeast(tool.riskLevel, APPROVAL_RISK_LEVEL)`；`code`/`register`/`unregister` 用 `new Function` 沙箱。
+- `requestApproval`（executor 导出核心函数，withHooks）：内部经 `ctx.agent.extensions.get('approval')` 委托 UI；headless 未挂载→**自动放行**并记录。所有原 `ui.requestApproval(...)` 调用改为 `requestApproval(..., ctx.agent)`。
+- `SYS_AUTHOR = 'sys'`（默认 author）；`executor` 导出 `extraBuiltinTools`（UI 注入枚举用，不 import UI）。
+- **默认工具（5 个）**：
+  - `gm_storage`（`action` get/set/list/del；`del`=high 确认闸；`set` 支持 `/update true` 合并写）
+  - `code_run`（high 确认闸；`new Function('ctx', code)({storage,executor,agent,console})`，return 值回显）
+  - `tool_manager`（`action` register/remove/list/export/export_cmd/list_disabled/delete；`register` 默认停用 `enabled=true` 才立即注册；`/libs` 参数=安装期从 CDN fetch 库源码内联进 code 见 §13；`export`=raw 自注册 IIFE、`export_cmd`=手动安装命令、`list_disabled`=列启用=false 的自编排工具；`delete`=经确认闸删除，`remove` 为其别名）
+  - `orchestrate`（5 action：view/update/setRequestBody/addHook/removeHook；后四 high；view 返回系统提示+7 钩子目标运行期数组+工具清单+引擎；addHook/removeHook 热插拔用户钩子存 `hooks:<id>`，`rehydrateHooks` 重建）
+  - `session`（无 codeGenTool；**惰性创建**：register 仅装钩子、首条真实对话才建 `session:<id>`+`default:sessions` 索引；`action` info/save/list/create/switch/remove；`flushSession` 复用落盘）
+- **引擎动态请求体（设计铁律）**：`baseRequestBody`（`config.ts` `getBaseRequestBody/setBaseRequestBody`，存 `default:baseRequestBody`）每轮合并进 streamChat 请求体（model 可被子覆盖，messages/stream 运行期填充；显式 `opts.temperature/maxTokens/reasoningEffort` 优先）；`orchestrate.view` 的 `engine = { endpoint:{model,baseURL}(来自 default:config) + baseRequestBody }`，`setRequestBody` 热更新模板（无需重载）。**`config`=连哪个（baseURL/apiKey/model 端点），`baseRequestBody`=怎么问（温度/推理强度/厂商扩展/可覆盖 model），二者分离且引擎参数必须可经编排动态查看与编辑。**
+- 工具 `/libs` 自包含机制：`resolveLibUrls(spec)`（完整 URL 原样；别名 `marked`/`dompurify`→jsDelivr；默认 spec→`https://cdn.jsdelivr.net/npm/<spec>`）返回 `{jsdelivr,unpkg,cdnjs}` 三源数组；安装期 `fetchLibText`（fetch 优先→`GM_xmlhttpRequest` 兜底）逐库取源码，任一失败→中断安装；内联成 IIFE `(function(){ <libs> \n return (<userCode>); })()` 存 `desc.code`，`new Function('"use strict"; return (' + code + ');')` 编译——工具自此自包含离线可用（"用内容替换自己"）。
+
+### 12.4 storage 模块（`src/core/storage.ts`）
+- 命名空间 API：`get/set/del/keys(ns, key?)`；`realKey = ns + ':' + key`。
+- 分区：`default`(config,sessions) / `session` / `tools` / `code` / `memory`。
+- `listToolDefs()` 读 `tools` 全量（系统真相源）；`get` 真泛型。
+- `set` 保留 `withHooks(...)` 包装作扩展点（曾经 `bus.emit` 广播，bus 已删，不再挂钩子）。
+
+### 12.5 ui 模块（`src/ui/ui.ts` + `src/ui/markdown.ts`）
+- v4 玻璃**方框**无圆角浅色字（不挂背景板/标题栏；`--glass:rgba(18,26,44,.52)`、`--text:#eef2ff`、品牌 `#378DDD`、风险 high 橙 `#fb923c`）；气泡区 `mask-image` 顶部渐隐。
+- **可插拔组件（概念上的 tool/adapter），核心绝不 import UI**。方法（`ui.chat` / `ui.panel` / `ui.tools` / `ui.requestApproval`）：
+  - `ui.chat`: `mount/append/updateLast/setToolHTML/setMarkdownRenderer/resetMarkdownRenderer/finalizeLast/setRunning/send/setInput/refreshAutocomplete/acceptAutocomplete`
+  - `ui.panel`: `toggle/setCollapsed/isCollapsed`
+  - `ui.tools`: `toggle/open/close/refresh`（⚙ 面板 `allToolStates` + `setEnabled`）
+  - `ui.requestApproval`: withHooks 确认闸
+  - `mount()` 时把 `ui.chat` 设给 `agent.output`、向 `agent.extensions` 注册 `'ui'`(渲染)/`'approval'`(确认闸)。
+- Trusted Types 兼容：所有 `innerHTML` 赋值必须走 `setHTML(el, html)`（建一次性 `createPolicy('miniagent', {createHTML:(s)=>s})`），勿裸赋。
+- 渲染库（marked+DOMPurify）加载见 §13.1；markdown 渲染 `tools/marked.ts` 直接消费 `@require` 编译期注入 userscript 全局作用域的全局 `marked`/`DOMPurify`，运行期无下载。
+
+### 12.6 agent 模块（`src/agent.ts`）
+- 全局单例 `globalThis.agent`；**解耦铁律**：引擎/`sendMessage`/`handleToolCommand` 只写 `agent.output`（OutputSink 契约，默认 headless 空实现），绝不直连 ui；核心经 `agent.extensions`（Map 通用能力表）发现 UI 能力，不硬引用 `agent.ui`。
+- 队列引擎（engine）：两队列 `messageQueue`/`toolCallQueue` + SENTINEL 驱动；`running = messageQueue.length || toolCallQueue.length`（peek 不弹，在途期间队列非空，派生正确）。
+- `init()`：`migrateFlatToNs` → `getConfig`（含 `disabledTools` 黑名单）→ `executor.attachAgent` → `registerAll(bootList 剔除黑名单)` → `rehydrateTools` → `rehydrateHooks`。
+- `orchestrateSystemPrompt` 走 `sendMessage.beforeExe` 幂等钩子；运行态按钮 `sendMessage.beforeExe setRunning(true)` + engine.finally `setRunning(false)`。
+- `mount()` = 唯一 UI 接入点（设 output + 注册 extensions）；仅 dev 分支挂 `unsafeWindow.agent`（`__BUILD_BRANCH__==='dev'` 守卫），发布分支不挂。
+- `uiTool`（定义于此）：`register` 挂载 DOM+接 output/extensions、`unregister` 卸载+还原 headless，经 `extraBuiltinTools` 注入枚举；持久化最小启动器 `#miniagent-launcher`（UI 卸载后重开入口，独立于已卸载 UI）。
+- `parseToolCommand()` / `handleToolCommand()`：解析 `/tool /param value /flag` 语法，绕过 LLM 直接调 `executor.run`（`/` 开头→工具命令；apiKey 空→提示配置；否则正常 sendMessage）。
+
+### 12.7 config 模块（`src/model/config.ts`）
+- `AppConfig`（含 `disabledTools?: string[]` 黑名单、`apiKey`/`baseURL`/`model`）；`getConfig/saveConfig`。
+- `SYS_AUTHOR`、`RiskLevel` + `APPROVAL_RISK_LEVEL='high'` + `riskAtLeast()`。
+- `getBaseRequestBody/setBaseRequestBody`、`getSystemPrompt`（读 `config:systemPrompt` 回退源码默认）。
+- `SYSTEM_PROMPT`：工具说明同步（gm_storage/tool_manager/orchestrate/session/code_run）；明确"code_run 由系统自动弹确认框，你无需文字确认，直接调用"（避免双重确认）。
+
+## 13. 外部库加载策略（最终方案）
+
+**分层二分**：按"库是核心系统功能还是工具自带代码"选择加载通道，二者不混用。
+
+### 13.1 核心系统功能 → 油猴 `@require`（油猴管缓存）
+- **适用对象**：`marked` / `DOMPurify` 等**系统级渲染/基础库**（固定、编译期可知、被核心代码直接 import）。
+- **加载方式**：在 `vite-plugin-monkey` 的 `userscript` 配置里声明 `@require`，URL 走官方 CDN（见 §13.4）。油猴首次下载后随脚本缓存，脚本版本递增时自动随更新重新拉取——**缓存完全由 Tampermonkey 管理，核心代码不自己 fetch、不自己维护缓存**。
+- **引用**：脚本世界内直接引用库暴露的全局名（`marked` / `DOMPurify`），由 `@require` 编译期注入 userscript 全局作用域，运行期直接消费，无运行时下载。
+- **落地**：`vite.config.ts` 的 `userscript.require` 数组增条目；核心模块（如 `tools/marked.ts` 的 markdown 渲染接管）改为消费 `@require` 注入的全局，移除运行时下载分支。
+
+### 13.2 纯 JS 代码工具 → `new Function` 自包含（运行时沙箱）
+
+- **适用对象**：工具**自带的可执行 `code`**（含 `/libs` 安装期从 CDN fetch 并内联进 code 的库、agent 生成的临时脚本）。这类代码运行期才确定，不适合写死进 `@require`，故走运行时自包含。
+
+- **通用管线（设计思路）：download → replace → install**
+  1. **download（下载）**：安装期 `fetchLibText` 经外国 CDN 链（jsDelivr→unpkg→cdnjs，fetch 优先、GM_xmlhttpRequest 兜底）逐库拉取源码；任一库失败即中断安装。
+  2. **replace（替换，按需、非必做）**：若库源码引用 `window`/`self`（典型 UMD 包），将其 `replace(/\bwindow\b/g, 'globalThis')` 换成脚本世界 globalThis，使其在隔离世界可解析。**大部分纯 JS 库不引用 `window`，故这步常省略**——不要为不需要的库硬做替换。
+  3. **install（安装）**：把库源码包进 IIFE `(function(){ <libs> \n return (<userCode>); })()` 内联进工具 `code`，经 `new Function('"use strict"; return (' + code + ');')` 编译；工具自此**自包含、离线可用**（"用内容替换自己"）。
+
+- **当前落地**：`executor.ts` 的 `tool_manager` `/libs` 已做 download + install；replace 为可选（实测多数库不需要，故默认不做 window 替换，仅在确需时补）。`compileFn`（`call`/`register`/`unregister` 共用）与 `exportToolToJs` 的 `buildFn` 用同一 `new Function` 编译表达式，导出片段同样自包含、可独立重注册。
+
+- **优势**：轻量、无持久化、不污染页面 main world、不增存储；工具完全自包含、离线可用。
+
+### 13.3 下载与通道约束
+- **下载（仅 13.2 纯 JS 工具用）**：复用 executor 的 `fetchLibText`（`fetch` 优先 → `GM_xmlhttpRequest` 兜底；jsDelivr 带 `ACAO:*` 跨域 GET 不受 @connect 限制，比 GM_xmlhttpRequest 稳）。
+- **`vite.config.ts` grant 不含 `GM_addElement`**：`<script src>` 注入把库挂到页面 main world，与脚本隔离世界 globalThis 不互通，已废弃。
+
+### 13.4 CDN 链（全外国，移除国内镜像）
+- `jsDelivr → unpkg → cdnjs` 依次兜底，任一成功即返回，全失败才 reject。核心 `@require` 与纯 JS 工具 `/libs` 安装链共用此链。
+- **版本同步维护点**：核心 `@require`（`vite.config.ts` 的 `userscript.require` 数组，如 `marked@12`/`dompurify@3`）与纯 JS 工具安装期 `executor.ts` 的 `KNOWN_LIBS`（同版本号）是**两处手写、用途不同、不合并**——前者给编译期核心库、后者给工具安装期 `/libs`；升版本需手动同步两处，避免漂移。
+- ⚠️ 历史误判已作废："new Function 不能加载 UMD 库" 是误判（根因是跨世界边界，非 new Function 本身）；纯 JS 工具通道用脚本世界 new Function（replace 按需，见 §13.2）。核心系统库则整体迁到 `@require`，不再走运行时下载。
+
+## 14. 构建与发布
+
+- `vite.config.ts`：纯原生 TS + `vite-plugin-monkey`；`__BUILD_BRANCH__` 守卫 `unsafeWindow` grant（dev 含、发布分支无）；`@version` 用 package.json base + 秒级时间戳 `YYYYMMDDHHmmss`（Tampermonkey 按 `.` 分段比较，每次 build 必递增）；`updateURL`/`downloadURL` 固定 `http://localhost:4173/miniagent.user.js`（无 git 分支魔法）。
+- `package.json` scripts：`dev` / `build` / `typecheck` / `test`（`= vite build && vite preview`，preview `port:4173, host:true`）。油猴点"检查更新"从 localhost 拉，version 递增即更新。
+- **`@noframes` 保留（iframe 去重）**：`userscript.noframes` 用于**防止页面内多个 iframe 各自加载一份插件实例**（避免重复实例化与互相干扰），是有意保留项，并非用于"修复" `runtime.lastError`。
+- **已撤销**：为"修" Tampermonkey/Chrome MV3 `runtime.lastError` 环境报错而加的 `stripXmlHttpGrant()` / `GM_addValueChangeListener` 跨标签推送——均证伪（与本脚本无关，见 §17），已还原。
+
+## 15. 设计铁律与用户偏好（务必遵守，避免重蹈覆辙）
+
+1. **保持 OOP 范式**，不重写成 React/langchain/antd（曾从 2.29MB 框架版砍成 9KB 原生 TS，不再回退）。
+2. **核心绝不 import UI 模块**，也不得硬编码 `agent.ui`；UI 能力只经 `agent.extensions.get('KEY')` 发现。核心可无 UI headless 运行。
+3. **UI 是工具清单里一个可逆的 tool**；关闭=在 ⚙ 清单禁用 `ui`（必经确认闸），**绝不**做"一次性 `root.remove()` 后无重开入口"的永久销毁式关闭（不人道）。
+4. **重大设计先确认再动手**：用户只说"关闭 UI 是风险操作要确认"时，勿自作主张实现成永久销毁、且未确认就提交。先对齐"关闭形态"再写码。
+5. **外部库用外国 CDN**（jsDelivr/unpkg/cdnjs），不引入国内镜像。
+6. **不要在项目代码里反复改 GM grant / 注入策略去"修" Tampermonkey/Chrome MV3 的环境报错**（`Unchecked runtime.lastError: ... Receiving end does not exist.` 是官方已知 issue #1083，与本脚本逻辑无关）。真要修的是独立的"部分页面工具（⚙ 面板）不显示"现象。
+7. 顶层禁写死业务装配副作用（系统提示/工具清单/运行态/权限走 `sendMessage.beforeExe` 等钩子）；bootstrap（seed、UI mount）可留顶层。base 只留最小核心流程。
+8. 工具面闸门=用户确认（任何工具含 sys/第三方经确认可替换/删除）；`SYS_AUTHOR` 仅作默认值，非编辑限制。systool 替换：同名先 unregister 再 register；`rehydrateTools` 持久化覆盖硬编码。
+
+## 16. 已知技术债与阶段3待办
+
+- **已修复**（2026-07-21）：流式工具调用 3 脆弱点——①双累加器冗余（agent.ts 改手动迭代器消费 `streamChat` return 值）；②缺 `index` 多工具合并（`tc.index ?? Object.keys(acc).length`）；③推理未写回历史（`ChatMessage` 加 `reasoning_content`，推送 assistant 带 `reasoning_content`）。
+- **待办（阶段3 可选）**：① `max-iter` 工具循环防护（用户定"暂不加"）；② `inputSchema` 参数校验（文档 §9 三护栏之一，run() 未校验）；③ 安装期 AI 审查代码分支（§6）；④ 上下文/权限管理（CallCtx 仅 TODO 占位，不进运行时）；⑤ system/control 消息类型与 turn 原子性（§4 队列已实现，消息类型枚举未全做）。
+- 取消/停止：`cancel()` 仅中断 LLM 流，code_run 确认等待期间点"停止"无效（已知小问题，未处理）。
+
+## 17. 关键纠错与教训（历史记录，避免重复踩坑）
+
+- **"✕ 永久销毁关闭 UI"被推翻**：曾实现 UI 右上角 ✕ 确认后 `root.remove()` 卸载无重开入口，违背"UI 是可逆 tool"意图 → `git revert` 后改为 UI-as-tool（§11.3 / §15.3）。
+- **"new Function 不能加载 UMD 库"为误判**：根因是脚本隔离世界 globalThis 与页面 main world 不互通（跨世界边界），非 new Function 不行；最终脚本世界 new Function（replace 按需，见 §13.2）。
+- **"runtime.lastError 是脚本导致"证伪**：用户明确非本脚本导致（Tampermonkey/Chrome MV3 环境问题）。`stripXmlHttpGrant` / 跨标签总线（`GM_addValueChangeListener` 推送）等推测性"修复"已撤销还原。**`@noframes` 不在撤销之列**——它本就不是为修该报错而生，而是 iframe 去重（防页面内多 iframe 各加载一份插件），有意保留（见 §0.4 / §14）。
+- **"sys 作者守卫"反转**：曾限制仅 `sys` 作者工具可经 tool_manager 编辑/删除；用户要求"所有工具均可经用户确认后更新" → 闸门从 author 改为用户确认（§15.8）。
+- **依赖与工具契约/注册流/三视图/确认机制缠死**：改依赖管理不止 2 文件，需全量对齐（保持 OOP）。
