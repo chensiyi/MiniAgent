@@ -1,5 +1,5 @@
 import gmFetch from '@sec-ant/gm-fetch';
-import { getConfig } from '../model/config';
+import { getConfig, getBaseRequestBody } from '../model/config';
 import { withHooks } from './withHooks';
 
 export type ChatRole = 'user' | 'assistant' | 'system' | 'tool';
@@ -73,11 +73,13 @@ export const llm = {
     if (!apiKey) throw new Error('未配置 API Key：请输入 /gm_storage /action set /ns default /key config /update true /value {"apiKey":"你的Key","baseURL":"https://openrouter.ai/api/v1","model":"openrouter/free"}');
 
     const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
-    const body: Record<string, unknown> = {
-      model,
-      messages: opts.messages,
-      stream: true,
-    };
+    // baseRequestBody：编排可热更新的请求模板（每轮合并；可被显式 opts 覆盖）。
+    // model 允许被模板覆盖，但 messages/stream 始终由运行期填充，模板无法破坏它们。
+    const base = getBaseRequestBody();
+    const body: Record<string, unknown> = { ...base };
+    body.model = (typeof base.model === 'string' && base.model) ? base.model : model;
+    body.messages = opts.messages;
+    body.stream = true;
     if (opts.tools?.length) {
       body.tools = opts.tools.map((t) => ({
         type: 'function',

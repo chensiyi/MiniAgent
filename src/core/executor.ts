@@ -1,6 +1,6 @@
 import { storage } from './storage';
 import { llm } from './llm';
-import { REQUIRE_CODE_APPROVAL, APPROVAL_RISK_LEVEL, riskAtLeast, getConfig, saveConfig, getSystemPrompt } from '../model/config';
+import { REQUIRE_CODE_APPROVAL, APPROVAL_RISK_LEVEL, riskAtLeast, getConfig, saveConfig, getSystemPrompt, getBaseRequestBody, setBaseRequestBody } from '../model/config';
 import { withHooks, type HookedFunction } from './withHooks';
 
 // 核心审批闸（带钩子，可被 orchestrate 钩子接管）：经通用能力注册表取 UI 提供的审批能力；
@@ -213,6 +213,49 @@ export function exportToolToJs(desc: ToolDesc): string {
   parts.push('  console.log("[MiniAgent] 已注册并持久化工具:", desc.name);');
   parts.push('})();');
   return header + '\n' + parts.join('\n');
+}
+
+// 把一个工具描述符导出为"手动安装命令"格式：/tool_manager /action register /name ... /code ...
+// 与 parseToolCommand（agent.ts）的解析规则严格对齐：
+//   - 未加引号的值读到"下一个 空格+/参数"或行尾 → 因此把 /code（可能含引号/斜杠/换行）放最后，整段读到行尾，天然安全；
+//   - 对象/数组值（inputSchema/deps）用紧凑 JSON（无多余空格），解析器识别 {…}/[…] 走 JSON.parse；
+//   - description 用双引号包裹（读到匹配引号）。
+// 说明：命令格式无法可靠承载多个函数体，含 register/unregister 安装钩子的工具请改用 export（raw JS）。
+export function exportToolToCmd(desc: ToolDesc): string | { error: string } {
+  if (desc.register || desc.unregister) {
+    return { error: `工具 ${desc.name} 含 register/unregister 安装钩子，命令格式无法承载多个函数体；请改用 export（raw JS）导出。` };
+  }
+  const parts: string[] = ['/tool_manager', '/action', 'register'];
+  parts.push('/name', desc.name);
+  if (desc.author && desc.author !== SYS_AUTHOR) parts.push('/author', desc.author);
+  if (desc.riskLevel) parts.push('/riskLevel', desc.riskLevel);
+  parts.push('/enabled', desc.enabled === false ? 'false' : 'true');
+  parts.push('/inputSchema', JSON.stringify(desc.inputSchema ?? { type: 'object', properties: {} }));
+  if (desc.deps && desc.deps.length) parts.push('/deps', JSON.stringify(desc.deps));
+  parts.push('/description', '"' + desc.description + '"');
+  // /code 必须放最后：未加引号的值读到行尾，容纳代码中的引号/斜杠/换行（含 /libs 内联后的自包含源码）。
+  parts.push('/code', desc.code);
+  return parts.join(' ');
+}
+
+// 导出用：优先取持久化描述符（含 /libs 内联库源码，自包含可重装）；运行期 ToolDef 经 toString 兜底（会丢内联库）。
+function resolveToolDesc(name: string): ToolDesc | undefined {
+  const persisted = storage.get<ToolDesc>('tools', name);
+  if (persisted) return persisted;
+  const live = registry.get(name);
+  if (!live) return undefined;
+  return {
+    name: live.name,
+    author: live.author,
+    description: live.description,
+    inputSchema: live.inputSchema,
+    deps: live.deps,
+    riskLevel: live.riskLevel,
+    code: live.call ? live.call.toString() : '',
+    register: live.register ? live.register.toString() : undefined,
+    unregister: live.unregister ? live.unregister.toString() : undefined,
+    enabled: true,
+  } as ToolDesc;
 }
 
 // 依赖校验（按 name 匹配；缺失→拒绝；author 不符→收集警告但可继续，§5）
@@ -584,16 +627,16 @@ const codeRunTool: ToolDef = {
 const toolManagerTool: ToolDef = {
   name: 'tool_manager',
   author: 'sys',
-  description: '统一的工具自编排管理。action 取值：register=注册/创建新工具（持久化到 tools 命名空间，重载按依赖拓扑自动重建；code 为 call 源码，register 可选为安装源码；默认停用，enabled=true 立即启用）；remove=删除工具（移除持久化并注销）；list=枚举当前所有已注册工具（含无 call 的系统原语），供查看完整能力面；export=导出工具完整定义（含 call/register/unregister 源码）为 JS 代码。注：自编排工具导出的是可重注册的源码串；内置（sys）工具导出的 call 来自函数反编译，可能引用模块内部状态，仅作查看/参考，不保证可独立运行；list_disabled=列出所有已停用的自编排工具。',
+  description: '统一的工具自编排管理。action 取值：register=注册/创建新工具（持久化到 tools 命名空间，重载按依赖拓扑自动重建；code 为 call 源码，register 可选为安装源码；默认停用，enabled=true 立即启用）；remove=删除工具（移除持久化并注销）；list=枚举当前所有已注册工具（含无 call 的系统原语），供查看完整能力面；export=导出工具为可直接注册的 raw JS 代码（控制台粘贴即用）；export_cmd=导出工具为手动安装命令（/tool_manager /action register …，聊天输入框粘贴即用；含 register/unregister 安装钩子的工具不支持，请改用 export）。注：自编排工具导出自包含（含 /libs 内联库）；内置（sys）工具导出的 call 来自函数反编译，可能引用模块内部状态，仅作查看/参考，不保证可独立运行；list_disabled=列出所有已停用的自编排工具。',
   inputSchema: {
     type: 'object',
     properties: {
       action: {
         type: 'string',
-        enum: ['register', 'remove', 'list', 'export', 'list_disabled'],
-        description: '操作类型：register=创建/注册新工具（持久化到 tools 命名空间，重载按依赖拓扑自动重建；默认停用，enabled=true 立即启用）；remove=删除工具（注销并移除持久化）；list=枚举当前所有已注册工具（含无 call 的系统原语）；export=导出工具完整定义（含 call/register/unregister 源码）为 JS 代码。内置（sys）工具导出的 call 来自函数反编译，可能引用模块内部状态，仅作查看/参考；list_disabled=列出所有已停用（未启用）的自编排工具。',
+        enum: ['register', 'remove', 'list', 'export', 'export_cmd', 'list_disabled'],
+        description: '操作类型：register=创建/注册新工具（持久化到 tools 命名空间，重载按依赖拓扑自动重建；默认停用，enabled=true 立即启用）；remove=删除工具（注销并移除持久化）；list=枚举当前所有已注册工具（含无 call 的系统原语）；export=导出工具为 raw JS 代码（控制台粘贴即用）；export_cmd=导出工具为手动安装命令（/tool_manager /action register …，输入框粘贴即用；含安装钩子的工具不支持）；两者内置（sys）工具的 call 均来自函数反编译，可能引用模块内部状态，仅作查看/参考；list_disabled=列出所有已停用（未启用）的自编排工具。',
       },
-      name: { type: 'string', description: '工具名（register/remove/export 必需）。按 name 匹配（注册时与 author 组合成唯一标识）。' },
+      name: { type: 'string', description: '工具名（register/remove/export/export_cmd 必需）。按 name 匹配（注册时与 author 组合成唯一标识）。' },
       author: { type: 'string', description: `可选作者名（默认 "${SYS_AUTHOR}"；与 name 组合唯一；覆盖既有工具即替换，需用户确认）。` },
       description: { type: 'string', description: '工具说明（register 必需），会展示给 LLM 作为该工具的能力描述。' },
       inputSchema: {
@@ -710,30 +753,23 @@ const toolManagerTool: ToolDef = {
       case 'export': {
         const name = String(args.name ?? '');
         if (!name) return '参数 name 缺失';
-        // 优先用持久化描述符（含内联依赖库源码），保证导出自包含、可独立重注册；
-        // 运行期 ToolDef 经 toString 取源码会丢失内联库，仅作兜底。
-        const desc: ToolDesc | undefined = ctx.storage.get<ToolDesc>('tools', name) ?? (() => {
-          const live = registry.get(name);
-          if (!live) return undefined;
-          return {
-            name: live.name,
-            author: live.author,
-            description: live.description,
-            inputSchema: live.inputSchema,
-            deps: live.deps,
-            riskLevel: live.riskLevel,
-            code: live.call ? live.call.toString() : '',
-            register: live.register ? live.register.toString() : undefined,
-            unregister: live.unregister ? live.unregister.toString() : undefined,
-            enabled: true,
-          } as ToolDesc;
-        })();
+        const desc = resolveToolDesc(name);
         if (!desc || !desc.code) return `未找到可导出的工具: ${name}`;
-        // 以 markdown 代码块包裹，便于在聊天里直接复制。
+        // 默认导出 raw JS（控制台粘贴即用），以 markdown 代码块包裹便于复制。
         return '```js\n' + exportToolToJs(desc) + '\n```';
       }
+      case 'export_cmd': {
+        const name = String(args.name ?? '');
+        if (!name) return '参数 name 缺失';
+        const desc = resolveToolDesc(name);
+        if (!desc || !desc.code) return `未找到可导出的工具: ${name}`;
+        // 导出手动安装命令（聊天/输入框粘贴即用），与 parseToolCommand 解析规则对齐。
+        const cmd = exportToolToCmd(desc);
+        if (typeof cmd !== 'string') return cmd.error;
+        return '```\n' + cmd + '\n```';
+      }
       default:
-        return `未知 action: ${action}（支持 register/remove/list/export/list_disabled）`;
+        return `未知 action: ${action}（支持 register/remove/list/export/export_cmd/list_disabled）`;
     }
   },
 };
@@ -781,16 +817,17 @@ const orchestrateTool: ToolDef = {
   name: 'orchestrate',
   author: 'sys',
   description:
-    '系统编排管理：查看并热更新当前智能体的"编排"（运行期钩子 + 系统提示 + 工具面）。action 取值 view（查看实时编排快照：系统提示 + 各钩子目标 sendMessage/engine/run/streamChat/chat/requestApproval/storageSet 的运行期钩子清单（含 name 与 id）+ 工具清单 + 引擎参数）/ update（改写系统提示并热生效，需传 systemPrompt）/ addHook（热挂接用户钩子，需传 name/target/phase/code；code 为钩子体，签名 (opts, agent, storage, executor, console)，可经 opts.args 改写请求/消息，如在 streamChat.before 里改 opts.args[0].messages 即可在请求发出前编辑内容）/ removeHook（移除用户钩子，需传 hookId 或 name；按 name 移除所有同名用户钩子）。update/addHook/removeHook 执行前均弹确认框。',
+    '系统编排管理：查看并热更新当前智能体的"编排"（运行期钩子 + 系统提示 + 引擎请求体 + 工具面）。action 取值 view（查看实时编排快照：系统提示 + 各钩子目标 sendMessage/engine/run/streamChat/chat/requestApproval/storageSet 的运行期钩子清单（含 name 与 id）+ 工具清单 + 引擎（endpoint 的 model/baseURL，来自 default:config；以及可热更新的 baseRequestBody 请求模板，覆盖 model/temperature/max_tokens/reasoning_effort 及厂商扩展字段））/ update（改写系统提示并热生效，需传 systemPrompt）/ setEngine（热更新 baseRequestBody 请求模板，需传 baseRequestBody 的 JSON 字符串，影响后续每次请求，无需重载）/ addHook（热挂接用户钩子，需传 name/target/phase/code；code 为钩子体，签名 (opts, agent, storage, executor, console)，可经 opts.args 改写请求/消息，如在 streamChat.before 里改 opts.args[0].messages 即可在请求发出前编辑内容）/ removeHook（移除用户钩子，需传 hookId 或 name；按 name 移除所有同名用户钩子）。update/setEngine/addHook/removeHook 执行前均弹确认框。',
   inputSchema: {
     type: 'object',
     properties: {
       action: {
         type: 'string',
-        enum: ['view', 'update', 'addHook', 'removeHook'],
-        description: 'view=查看快照(默认)；update=改写系统提示；addHook=挂接用户钩子；removeHook=移除用户钩子',
+        enum: ['view', 'update', 'setEngine', 'addHook', 'removeHook'],
+        description: 'view=查看快照(默认)；update=改写系统提示；setEngine=热更新 baseRequestBody 请求模板；addHook=挂接用户钩子；removeHook=移除用户钩子',
       },
       systemPrompt: { type: 'string', description: 'update 时用的新系统提示全文' },
+      baseRequestBody: { type: 'string', description: 'setEngine 时的 baseRequestBody 请求模板 JSON 字符串（如 {"temperature":0.7,"reasoning_effort":"medium"}；可含 model 覆盖默认模型及厂商扩展字段）。整体替换，影响后续每次请求。' },
       name: { type: 'string', description: 'addHook 时钩子显示名；removeHook 时按名移除（移除所有同名用户钩子）。与 hookId 二选一' },
       target: {
         type: 'string',
@@ -828,7 +865,10 @@ const orchestrateTool: ToolDef = {
           systemPrompt: getSystemPrompt(),
           hooks: hooksSnap,
           tools: executor.list(true).map((t) => ({ name: t.name, author: t.author, hasCall: typeof t.call === 'function' })),
-          engine: { model: cfg.model, baseURL: cfg.baseURL },
+          engine: {
+            endpoint: { model: cfg.model, baseURL: cfg.baseURL },
+            baseRequestBody: getBaseRequestBody(),
+          },
         },
         null,
         2,
@@ -846,6 +886,24 @@ const orchestrateTool: ToolDef = {
       if (i >= 0) msgs[i] = { ...msgs[i], content: sp };
       else msgs.unshift({ role: 'system', content: sp });
       return '已更新系统提示并热生效（当下会话即应用）';
+    }
+    if (action === 'setEngine') {
+      const raw = String(args.baseRequestBody ?? '');
+      if (!raw) return 'setEngine 需提供 baseRequestBody（JSON 字符串）';
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (e) {
+        return `baseRequestBody 不是合法 JSON: ${e instanceof Error ? e.message : String(e)}`;
+      }
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        return 'baseRequestBody 必须是 JSON 对象（如 {"temperature":0.7,"reasoning_effort":"medium"}）';
+      }
+      const ok = await requestApproval({ name: 'orchestrate.setEngine', riskLevel: 'high', code: raw }, ctx.agent);
+      if (!ok) return '已取消';
+      setBaseRequestBody(parsed as Record<string, unknown>); // 持久化，下次 streamChat 起即生效（动态，无需重载）
+      const eff = getBaseRequestBody();
+      return `已热更新 baseRequestBody（后续请求生效）：${JSON.stringify(eff)}`;
     }
     if (action === 'addHook') {
       const codeStr = String(args.code ?? '');
@@ -898,7 +956,7 @@ const orchestrateTool: ToolDef = {
       }
       return removed ? `已移除 ${removed} 个钩子（id=${id || '-'} name=${name || '-'}）` : `未找到匹配钩子（id=${id || '-'} name=${name || '-'}）`;
     }
-    return '未知 action: ' + action;
+    return `未知 action: ${action}（支持 view/update/setEngine/addHook/removeHook）`;
   },
 };
 
