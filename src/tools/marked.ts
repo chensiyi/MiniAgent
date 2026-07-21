@@ -1,13 +1,15 @@
-// 独立 markdown 渲染工具（位于根目录 tools/，与 UI 解耦）
-// 渲染引擎：外部引入的 marked / DOMPurify，经 vite.config 的 @require 在安装期由 Tampermonkey 拉取并缓存，
+import type { ToolDef } from '../core/executor';
+
+// 独立 markdown 渲染工具文件（位于 src/tools/，与 UI 解耦；特殊例外见 ARCHITECTURE §12.5）。
+// 渲染引擎：外部引入的 marked / DOMPurify，经 vite.config 的 @require 由 Tampermonkey 在安装期拉取并缓存，
 //   运行时作为隔离世界全局直接可用（不内联进产物、不占脚本体、无跨世界/网络问题）。
 // 安全：渲染输出经 DOMPurify 清洗，避免 LLM 内容带来的 XSS；
 //       marked / DOMPurify 任一不可用时，回退为转义纯文本，保证不崩。
-// 自动渲染接入点：marked 工具 register 时经 ctx.agent.extensions.get('ui').setMarkdownRenderer 接管 UI 渲染
-//   （UI 作为可插拔组件注册在 agent.extensions 通用能力表的 'ui' 键），把助手正文 / think 正文自动渲染为 HTML；
-//   unregister 时经 resetMarkdownRenderer 还原默认渲染器。核心不硬引用 UI——若 UI 未挂载（headless），
-//   register 静默跳过，不影响工具自身。
-//   （默认渲染器仍由本模块的 renderMarkdown 提供，依赖全局 marked / DOMPurify，由 @require 在安装期注入。）
+// 双重出口：
+//   1) renderMarkdown(src) —— UI 默认渲染器直接 import 使用（ui.finalizeLast 调它）；
+//   2) markedTool —— 注册为系统工具（name:'marked'），可被 LLM / 用户命令 /marked 调用把 markdown 渲染成 HTML。
+//   marked 不做「接管 UI 渲染」（无 setMarkdownRenderer / resetMarkdownRenderer）；UI 直接消费 renderMarkdown，
+//   工具离线 / 卸载不影响默认渲染（run 仍走 renderMarkdown）。
 
 declare const marked: {
   parse(src: string, options?: Record<string, unknown>): string;
@@ -52,3 +54,19 @@ export function renderMarkdown(src: string): string {
   }
   return html;
 }
+
+// 渲染型系统工具：把 markdown 渲染为（已清洗）HTML，供 LLM / 用户命令 /marked 调用。纯渲染、无副作用。
+// 注意：本工具不接管 UI 渲染（无 setMarkdownRenderer），UI 始终用上面的 renderMarkdown 作默认渲染器。
+export const markedTool: ToolDef = {
+  name: 'marked',
+  author: 'sys',
+  description: 'Markdown 渲染工具：把 markdown 文本渲染为（经 DOMPurify 清洗的）HTML 字符串并返回。可用于把任意 markdown 源转成 HTML。纯渲染，无副作用。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      text: { type: 'string', description: '要渲染的 markdown 源文本' },
+    },
+    required: ['text'],
+  },
+  call: (_args) => renderMarkdown(String(_args.text ?? '')),
+};

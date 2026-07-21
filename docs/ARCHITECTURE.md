@@ -7,7 +7,7 @@
 > 一切设计、编码、重构都先对齐本节；§13/§14/§17 等是该规范在具体议题上的落地，冲突以本节为准。
 
 1. **范式**：OOP + `withHooks` 钩子工厂；内核极小（Agent=根注册器）；UI 可插拔、核心可 headless 运行。
-2. **解耦铁律**：核心（agent/executor/llm/storage）**绝不 `import` UI 模块**，也不得硬编码 `agent.ui`；UI 能力只经 `agent.extensions.get('KEY')` 发现。UI 是工具清单里一个**可逆**的 tool（关闭=禁用 `ui`，有确认、可重开），绝不永久销毁式关闭。
+2. **解耦铁律**：`executor`/`llm`/`storage` **绝不 `import` UI 模块**，也不得硬编码 `agent.ui`；UI 能力只经 `agent.extensions.get('KEY')` 发现。`agent` 作为**装配层**可 `import ui` 以定义 `uiTool` 适配器（§12.6，已在代码中如此实现），但运行时不依赖 UI 形状（经 `extensions` 解耦，headless 无 UI 照常跑）。UI 是工具清单里一个**可逆**的 tool（关闭=禁用 `ui`，有确认、可重开），绝不永久销毁式关闭。
 3. **外部库二分加载**（§13）：
    - 核心系统功能库（marked / DOMPurify 等固定基础库）→ 油猴 `@require`，缓存由 Tampermonkey 管理，核心不自己 fetch；
    - 纯 JS 代码工具（工具自带 `code`、`/libs` 安装期内联的库）→ 脚本世界 `new Function` 自包含（**download→replace→install**，见 §13.2），运行期沙箱、离线可用。
@@ -209,7 +209,7 @@ UI 不是核心的一部分，而是一个**可插拔组件**（概念上的 too
 
 2. **通用能力注册表 `agent.extensions`（`Map<string, unknown>`）**
    - 核心不硬引用 UI 的形状。UI 挂载时注册两项能力：
-     - `'ui'` → `ui.chat`：渲染型工具（如 marked）经 `agent.extensions.get('ui').setMarkdownRenderer(...)` 接管助手消息 / 思考渲染；核心不依赖某工具。
+     - `'ui'` → `ui.chat`：UI 渲染能力（`ui.chat.finalizeLast` 直接用 `src/tools/marked.ts` 的 `renderMarkdown` 渲染助手消息 / 思考）；`marked` 已作为**独立工具文件**常驻 `src/tools/`（见 §12.5），**不接管** UI 渲染（无 `setMarkdownRenderer`/`resetMarkdownRenderer`），工具离线 / 卸载不影响默认渲染。
      - `'approval'` → `ui.requestApproval`：人类确认闸（HITL）。
    - 工具 / 核心经 `agent.extensions` **发现**能力，而非 `import` 或硬编码 `agent.ui`。
 
@@ -221,12 +221,14 @@ UI 不是核心的一部分，而是一个**可插拔组件**（概念上的 too
 | 能力 | UI 挂载时 | headless（UI 未挂载） |
 |---|---|---|
 | 输出 | `ui.chat` DOM 渲染 | 空实现（无副作用，引擎照常跑 LLM / 工具） |
-| 渲染接管（marked 等） | `setMarkdownRenderer` 生效 | 工具 `register` 静默跳过（不崩） |
+| markdown 渲染 | ui 直接用 `renderMarkdown`（默认渲染器） | 同左（marked 工具即便离线也不影响默认渲染） |
 | 确认闸 | UI 弹确认气泡 | 自动放行（自动化场景） |
 
 ### 11.3 UI 作为 tool（已实现）：关闭界面 = 禁用 ui 工具，经确认闸、可逆
 
 UI 已实现为内置 tool（`name: 'ui'`）：由 `agent.ts` 定义 `uiTool`（含 `register`/`unregister` 钩子）并经 `extraBuiltinTools` 注入枚举；`executor` 不 `import` UI，保持解耦。`uiTool` 不带 `call`，故不进 LLM 工具清单，但 `allToolStates` 会列出它（可在 ⚙ 面板开关）。
+
+> **规划（2026-07-21）**：UI 在概念上即 `chat_ui`（见 §2.1/§2.2），计划正式命名为系统 tool `chat_ui`（当前代码名仍为 `ui`，仅改名、职责不变），作为独立、可逆的系统级 tool 常驻。今晚仅更新本文档记录该规划，**不改动代码**（代码重构另行排期）。
 
 - **注册即挂载**：`uiTool.register` 设 `agent.output = ui.chat`、向 `agent.extensions` 注册 `'ui'`/`'approval'`、挂载 DOM；`agent.init()` 启动期把 `uiTool` 加入 `bootList` 默认注册。
 - **关闭界面 = 禁用 ui 工具**：⚙ 清单取消勾选 → `executor.setEnabled('ui', false)` → 因 `name==='ui'` 且为禁用，**必经 `requestApproval` 确认闸**（UI 弹确认；headless 自动放行）。用户拒绝则什么都不做（面板 `onchange` 把复选框还原为实际状态），确认才 `unregister`：卸载 DOM + 还原 headless（`output` 回空实现、清空 `extensions` 的 `ui`/`approval`）。禁用状态写入 `config.disabledTools` 黑名单持久化，重载后 `init` 自动剔除、保持关闭。
@@ -262,34 +264,36 @@ UI 已实现为内置 tool（`name: 'ui'`）：由 `agent.ts` 定义 `uiTool`（
 - `ToolDef = { name, author?, description, inputSchema, deps?, riskLevel?, call?, register?, unregister? }`；`DepRef = { name, author?, version? }`；**唯一标识 = `name+author`**。
 - `register`/`unregister` 触发 `tool.register`/`tool.unregister`（同名先 unregister 再 register）；`registerAll` 先拓扑排序再注册（循环依赖→整体拒绝）；单 `register` 校验依赖（缺失→拒绝，author 不符→警告）。
 - 注册挂 `agent[name]` + `agent.tools`（Map）；`list(includeAll)` 默认返回有 `call` 的（进 LLM 清单），`list(true)` 全量；枚举/存储键/面板输出按**名称字母序**（确定性一致）。
-- `run` 注入 `RunCtx = { storage, executor, agent, this, console }`；确认闸 `riskAtLeast(tool.riskLevel, APPROVAL_RISK_LEVEL)`；`code`/`register`/`unregister` 用 `new Function` 沙箱。
+- `run` 注入 `RunCtx = { storage, executor, agent, this, console }`；确认闸 `riskAtLeast(tool.riskLevel, APPROVAL_RISK_LEVEL)`。
+- **运行时代码编译（沙箱）集中化（2026-07-21）**：所有 `new Function` 动态编译（工具 `code`/`register`/`unregister` 重建、`code_run` 自我执行、`orchestrate` 用户钩子）统一走 executor 顶层 `createSandboxFn`（`compileFn` 编译函数表达式、`compileBody` 编译函数体），禁止在调用链路散落裸 `new Function`；统一强制 `"use strict"` 且仅注入显式形参（ctx/opts/agent…），沙箱边界只在一处定义，便于审计加固。
 - `requestApproval`（executor 导出核心函数，withHooks）：内部经 `ctx.agent.extensions.get('approval')` 委托 UI；headless 未挂载→**自动放行**并记录。所有原 `ui.requestApproval(...)` 调用改为 `requestApproval(..., ctx.agent)`。
 - `SYS_AUTHOR = 'sys'`（默认 author）；`executor` 导出 `extraBuiltinTools`（UI 注入枚举用，不 import UI）。
-- **默认工具（5 个）**：
+- **默认工具（6 个）**：
   - `gm_storage`（`action` get/set/list/del；`del`=high 确认闸；`set` 支持 `/update true` 合并写）
-  - `code_run`（high 确认闸；`new Function('ctx', code)({storage,executor,agent,console})`，return 值回显）
+  - `code_run`（high 确认闸；经顶层沙箱 `compileBody(['ctx'], code)` 执行，return 值回显）
   - `tool_manager`（`action` register/remove/list/export/export_cmd/list_disabled/delete；`register` 默认停用 `enabled=true` 才立即注册；`/libs` 参数=安装期从 CDN fetch 库源码内联进 code 见 §13；`export`=raw 自注册 IIFE、`export_cmd`=手动安装命令、`list_disabled`=列启用=false 的自编排工具；`delete`=经确认闸删除，`remove` 为其别名）
   - `orchestrate`（5 action：view/update/setRequestBody/addHook/removeHook；后四 high；view 返回系统提示+7 钩子目标运行期数组+工具清单+引擎；addHook/removeHook 热插拔用户钩子存 `hooks:<id>`，`rehydrateHooks` 重建）
-  - `session`（无 codeGenTool；**惰性创建**：register 仅装钩子、首条真实对话才建 `session:<id>`+`default:sessions` 索引；`action` info/save/list/create/switch/remove；`flushSession` 复用落盘）
-- **引擎动态请求体（设计铁律）**：`baseRequestBody`（`config.ts` `getBaseRequestBody/setBaseRequestBody`，存 `default:baseRequestBody`）每轮合并进 streamChat 请求体（model 可被子覆盖，messages/stream 运行期填充；显式 `opts.temperature/maxTokens/reasoningEffort` 优先）；`orchestrate.view` 的 `engine = { endpoint:{model,baseURL}(来自 default:config) + baseRequestBody }`，`setRequestBody` 热更新模板（无需重载）。**`config`=连哪个（baseURL/apiKey/model 端点），`baseRequestBody`=怎么问（温度/推理强度/厂商扩展/可覆盖 model），二者分离且引擎参数必须可经编排动态查看与编辑。**
+  - `session`（无 codeGenTool；**惰性创建**：register 仅装钩子、首条真实对话才建 `session:<id>`+扁平 `sessions` 索引；`action` info/save/list/create/switch/remove；`flushSession` 复用落盘）
+  - `marked`（独立工具文件 `src/tools/marked.ts`，特殊例外见 §12.5；`call(text)` 把 markdown 渲染为 HTML，纯渲染、无副作用；ui 默认渲染器 `renderMarkdown` 亦出自此文件）
+- **引擎动态请求体（设计铁律）**：`baseRequestBody`（`config.ts` `getBaseRequestBody/setBaseRequestBody`，存扁平键 `baseRequestBody`）每轮合并进 streamChat 请求体（model 可被子覆盖，messages/stream 运行期填充；显式 `opts.temperature/maxTokens/reasoningEffort` 优先）；`orchestrate.view` 的 `engine = { endpoint:{model,baseURL}(来自扁平 config 键) + baseRequestBody }`，`setRequestBody` 热更新模板（无需重载）。**`config`=连哪个（baseURL/apiKey/model 端点），`baseRequestBody`=怎么问（温度/推理强度/厂商扩展/可覆盖 model），二者分离且引擎参数必须可经编排动态查看与编辑。**
 - 工具 `/libs` 自包含机制：`resolveLibUrls(spec)`（完整 URL 原样；别名 `marked`/`dompurify`→jsDelivr；默认 spec→`https://cdn.jsdelivr.net/npm/<spec>`）返回 `{jsdelivr,unpkg,cdnjs}` 三源数组；安装期 `fetchLibText`（fetch 优先→`GM_xmlhttpRequest` 兜底）逐库取源码，任一失败→中断安装；内联成 IIFE `(function(){ <libs> \n return (<userCode>); })()` 存 `desc.code`，`new Function('"use strict"; return (' + code + ');')` 编译——工具自此自包含离线可用（"用内容替换自己"）。
 
 ### 12.4 storage 模块（`src/core/storage.ts`）
-- 命名空间 API：`get/set/del/keys(ns, key?)`；`realKey = ns + ':' + key`。
-- 分区：`default`(config,sessions) / `session` / `tools` / `code` / `memory`。
+- 命名空间 API：`get/set/del/keys(ns, key?)`；`realKey`：空 ns → 扁平键（如 `config` / `baseRequestBody` / `sessions`），非空 → `ns:key`（如 `session:<id>` / `tools:name`）。
+- 分区：扁平键 `config` / `baseRequestBody` / `sessions`（无 ns，用户在 Tampermonkey 数值里可直接编辑）/ 命名空间 `session` / `tools` / `code` / `memory`。
 - `listToolDefs()` 读 `tools` 全量（系统真相源）；`get` 真泛型。
 - `set` 保留 `withHooks(...)` 包装作扩展点（曾经 `bus.emit` 广播，bus 已删，不再挂钩子）。
 
-### 12.5 ui 模块（`src/ui/ui.ts` + `src/ui/markdown.ts`）
+### 12.5 ui 模块（`src/ui/ui.ts`）+ marked 渲染（独立工具文件 `src/tools/marked.ts`）
 - v4 玻璃**方框**无圆角浅色字（不挂背景板/标题栏；`--glass:rgba(18,26,44,.52)`、`--text:#eef2ff`、品牌 `#378DDD`、风险 high 橙 `#fb923c`）；气泡区 `mask-image` 顶部渐隐。
-- **可插拔组件（概念上的 tool/adapter），核心绝不 import UI**。方法（`ui.chat` / `ui.panel` / `ui.tools` / `ui.requestApproval`）：
-  - `ui.chat`: `mount/append/updateLast/setToolHTML/setMarkdownRenderer/resetMarkdownRenderer/finalizeLast/setRunning/send/setInput/refreshAutocomplete/acceptAutocomplete`
+- **可插拔组件（概念上的 tool/adapter），核心绝不 import UI**（`agent` 装配层除外，见 §0.2）。方法（`ui.chat` / `ui.panel` / `ui.tools` / `ui.requestApproval`）：
+  - `ui.chat`: `mount/append/updateLast/setToolHTML/finalizeLast/setRunning/send/setInput/refreshAutocomplete/acceptAutocomplete`
   - `ui.panel`: `toggle/setCollapsed/isCollapsed`
   - `ui.tools`: `toggle/open/close/refresh`（⚙ 面板 `allToolStates` + `setEnabled`）
   - `ui.requestApproval`: withHooks 确认闸
   - `mount()` 时把 `ui.chat` 设给 `agent.output`、向 `agent.extensions` 注册 `'ui'`(渲染)/`'approval'`(确认闸)。
 - Trusted Types 兼容：所有 `innerHTML` 赋值必须走 `setHTML(el, html)`（建一次性 `createPolicy('miniagent', {createHTML:(s)=>s})`），勿裸赋。
-- 渲染库（marked+DOMPurify）加载见 §13.1；markdown 渲染 `tools/marked.ts` 直接消费 `@require` 编译期注入 userscript 全局作用域的全局 `marked`/`DOMPurify`，运行期无下载。
+- **markdown 渲染（特殊例外，2026-07-21）**：`src/tools/marked.ts` 是**独立工具文件**，不跟随 `chat_ui`（UI 解耦），理由有二：① 其源码经油猴 `@require` 注入、运行时作为隔离世界全局消费；② markdown 是 LLM 界长期基本格式，应作为基础能力常驻。它有两个出口：`renderMarkdown(src)`（ui 默认渲染器 `finalizeLast` 直接 import 使用）与 `markedTool`（注册为系统工具 `name:'marked'`，可被 LLM / 用户命令 `/marked` 调用把 markdown 渲染为 HTML）。**`marked` 不接管 UI 渲染**（无 `setMarkdownRenderer`/`resetMarkdownRenderer`），ui 始终直接用 `renderMarkdown`，工具离线 / 卸载不影响默认渲染。渲染库（marked+DOMPurify）加载见 §13.1，运行期无下载。
 
 ### 12.6 agent 模块（`src/agent.ts`）
 - 全局单例 `globalThis.agent`；**解耦铁律**：引擎/`sendMessage`/`handleToolCommand` 只写 `agent.output`（OutputSink 契约，默认 headless 空实现），绝不直连 ui；核心经 `agent.extensions`（Map 通用能力表）发现 UI 能力，不硬引用 `agent.ui`。
@@ -303,7 +307,7 @@ UI 已实现为内置 tool（`name: 'ui'`）：由 `agent.ts` 定义 `uiTool`（
 ### 12.7 config 模块（`src/model/config.ts`）
 - `AppConfig`（含 `disabledTools?: string[]` 黑名单、`apiKey`/`baseURL`/`model`）；`getConfig/saveConfig`。
 - `SYS_AUTHOR`、`RiskLevel` + `APPROVAL_RISK_LEVEL='high'` + `riskAtLeast()`。
-- `getBaseRequestBody/setBaseRequestBody`、`getSystemPrompt`（读 `config:systemPrompt` 回退源码默认）。
+- `getBaseRequestBody/setBaseRequestBody`、`getSystemPrompt`（读扁平 `config.systemPrompt`，单一真相源）。`orchestrate.update` 经 `saveConfig({ systemPrompt })` 写入同一 blob；首次运行由 `init()` 用源码种子 `SYSTEM_PROMPT` 写入 config，**运行期不再回退源码常量**（消除"源码 + config"双源定义分歧）。
 - `SYSTEM_PROMPT`：工具说明同步（gm_storage/tool_manager/orchestrate/session/code_run）；明确"code_run 由系统自动弹确认框，你无需文字确认，直接调用"（避免双重确认）。
 
 ## 13. 外部库加载策略（最终方案）

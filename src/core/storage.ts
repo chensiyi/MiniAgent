@@ -1,15 +1,18 @@
 import { GM_getValue, GM_setValue, GM_deleteValue, GM_listValues } from '$';
 import { withHooks } from './withHooks';
 import type { ToolDesc } from './executor';
+import { NS } from './keys';
 
 // 逻辑存储层：薄封装 Tampermonkey GM_*，自动 JSON 序列化/反序列化。
-// 存储按"命名空间"分区：realKey = `${ns}:${key}`（如 default:config / session:<id> / tools:<name>）。
+// 存储按"命名空间"分区：realKey 空 ns → 扁平键（如 config），非空 → `${ns}:${key}`（如 default:xxx / session:<id> / tools:<name>）。
 // set 包 withHooks（保留扩展钩子能力）；get/del/keys 为基础操作无需钩子。
 
 const NS_SEP = ':';
 
+// 空 ns → 扁平键（无前缀），如 config；非空 → `${ns}:${key}`（如 default:xxx / tools:name）。
+// 这样 config 存为扁平键 `config`，用户在 Tampermonkey 数值里一眼可见、直接编辑（2026-07-21，回退到最初无 ns 设计）。
 function realKey(ns: string, key: string): string {
-  return `${ns}${NS_SEP}${key}`;
+  return ns ? `${ns}${NS_SEP}${key}` : key;
 }
 
 export const storage = {
@@ -42,18 +45,9 @@ export const storage = {
     return all.filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length));
   },
 
-  // 一次性迁移：把旧的扁平 key 搬到命名空间（仅首个版本遗留的 config）。
-  migrateFlatToNs(flatKey: string, ns: string, nsKey: string): void {
-    const raw = GM_getValue<string>(flatKey, undefined as unknown as string);
-    if (raw === undefined) return; // 旧键不存在，无需迁移
-    const cur = GM_getValue<string>(realKey(ns, nsKey), undefined as unknown as string);
-    if (cur === undefined) GM_setValue(realKey(ns, nsKey), raw); // 仅当新键缺失才搬
-    GM_deleteValue(flatKey);
-  },
-
   // 列出 tools 命名空间下全部工具描述符（系统真相源），供 boot 重建 / chat_ui 开关使用
   listToolDefs(): ToolDesc[] {
-    return storage.keys('tools')
+    return storage.keys(NS.TOOLS)
       .map((k) => storage.get<ToolDesc>('tools', k))
       .filter((d): d is ToolDesc => !!d);
   },

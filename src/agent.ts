@@ -1,9 +1,10 @@
 import { llm, type ChatMessage, type ToolCallLite, type ChatRequestBody, type ChatResult, type ChatChunk } from './core/llm';
 import { executor, defaultTools, extraBuiltinTools, type ToolCall, type ToolDef } from './core/executor';
 import { storage } from './core/storage';
+import { NS_FLAT, FLAT, LEGACY } from './core/keys';
 import { ui } from './ui/ui';
 import { withHooks } from './core/withHooks';
-import { getSystemPrompt, getConfig, getBaseRequestBody } from './model/config';
+import { getSystemPrompt, getConfig, getBaseRequestBody, saveConfig, SYSTEM_PROMPT } from './model/config';
 
 // 队列引擎的"继续推理"哨兵：工具跑完后压回 messageQueue 队首，引擎取出后只调 LLM、不提交新用户消息。
 const SENTINEL = { _infer: true } as unknown as ChatMessage;
@@ -197,7 +198,7 @@ Object.assign(setRunningHook, { __coreHook: true, __name: '运行态切换', __h
 agent.sendMessage.beforeExe.push(setRunningHook);
 
 // 基本初始化（进工作循环前的一次性 bootstrap，属架构铁律允许的顶层副作用）：
-// ① 旧扁平 config → default:config 迁移；② 种子默认配置（无内容也落盘）；
+// ① 种子默认配置（落盘为扁平 config）；② 旧 default:config 由 getConfig 惰性迁回扁平 config（兼容历史数据）；
 // ③ 绑定 agent 引用；④ 注册默认工具（→ 各 onRegister，含 session 落盘安装）；
 // ⑤ 重建持久化的自编排工具（→ onRegister 重建）。
 // ---- UI 作为 tool（§11：核心可无 UI 运行；UI 是工具清单里一个可禁用/启用的 tool）----
@@ -238,7 +239,7 @@ function createLauncher(): void {
 }
 
 // 配置不完整时的提示文案
-const CONFIG_HINT = '⚠️ 未配置 API Key。请先设置：\n输入 /gm_storage /action set /ns default /key config /update true /value {"apiKey":"你的Key","baseURL":"https://openrouter.ai/api/v1","model":"openrouter/free"}';
+const CONFIG_HINT = '⚠️ 未配置 API Key。两种设置方式：\n① 打开 Tampermonkey 仪表盘 → 本脚本 → 数值，直接编辑 `config` 键（JSON：{"apiKey":"你的Key","baseURL":"https://openrouter.ai/api/v1","model":"openrouter/free"}）；\n② 或运行命令：/gm_storage /action set /ns "" /key config /update true /value {"apiKey":"你的Key","baseURL":"https://openrouter.ai/api/v1","model":"openrouter/free"}';
 
 const uiTool: ToolDef = {
   name: 'ui',
@@ -247,7 +248,7 @@ const uiTool: ToolDef = {
   inputSchema: {},
   register: async (_ctx) => {
     agent.output = ui.chat; // 输出槽接管（agent.output 默认 headless 空实现）
-    agent.extensions.set('ui', ui.chat); // 渲染型工具（如 marked）经此接管 UI 渲染
+    agent.extensions.set('ui', ui.chat); // UI 渲染能力（ui.chat.finalizeLast 直接用 renderMarkdown；marked 已成为独立工具，不经此接管）
     agent.extensions.set('approval', ui.requestApproval); // 确认闸经此接入（核心 requestApproval 委托）
     await whenDomReady();
     ui.chat.mount((text) => {
@@ -277,9 +278,16 @@ const uiTool: ToolDef = {
 };
 
 function init(): void {
-  storage.migrateFlatToNs('config', 'default', 'config');
-  const cfg = getConfig(); // 先取 config（含工具黑名单 disabledTools）
-  if (!storage.get('default', 'config')) storage.set('default', 'config', cfg);
+  const cfg = getConfig(); // 先取 config（含工具黑名单 disabledTools；旧 default:config 在此惰性迁回扁平 config）
+  if (!storage.get(NS_FLAT, FLAT.CONFIG)) storage.set(NS_FLAT, FLAT.CONFIG, cfg);
+  // 系统提示单一真相源 = config：若 config 尚无 systemPrompt（首次运行 / 历史存档），用源码种子 SYSTEM_PROMPT 写入 config，
+  // 运行期不再读源码常量（orchestrate 等只认 config）。
+  if (cfg.systemPrompt === undefined) saveConfig({ systemPrompt: SYSTEM_PROMPT });
+  // 一次性迁移：旧 default 命名空间下的键（sessions / baseRequestBody）迁回扁平键（与 config 同策略，兼容历史数据）
+  for (const legacy of Object.values(LEGACY)) {
+    const v = storage.get(legacy.ns, legacy.key);
+    if (v !== undefined) { storage.set(NS_FLAT, legacy.key, v); storage.del(legacy.ns, legacy.key); }
+  }
   executor.attachAgent(agent);
   const disabled = new Set(cfg.disabledTools ?? []);
   extraBuiltinTools.push(uiTool); // UI 以 tool 形态加入内置清单（register/unregister 接管挂载/卸载）

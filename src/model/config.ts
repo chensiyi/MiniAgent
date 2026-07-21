@@ -1,11 +1,14 @@
 import { storage } from '../core/storage';
+import { NS_FLAT, FLAT, LEGACY } from '../core/keys';
 
-// 单一配置原型：基础必要变量（主题风格 + api 标准），一块 blob 存、一次读出反序列化
+// 单一配置原型：基础必要变量（主题风格 + api 标准），一块 blob 存、一次读出反序列化。
+// 系统提示 systemPrompt 并入本对象，统一存于扁平键 config（无 ns 前缀，用户在 Tampermonkey 数值里可直接编辑）。
 export interface AppConfig {
   theme: 'light' | 'dark';
   apiKey: string;
   model: string;
   baseURL: string;
+  systemPrompt?: string; // 系统提示单一真相源：存于扁平 config 键（orchestrate.update 经 saveConfig 写入；init 用源码种子值初始化）。运行期只认此值，不回退源码常量
   disabledTools?: string[]; // 工具黑名单：boot 时直接从注册名单剔除（文档 §3/§5.2）
 }
 
@@ -34,8 +37,10 @@ export function riskAtLeast(level: RiskLevel | undefined, threshold: RiskLevel):
 // 权限系统就位后，ui.requestApproval 可由权限 hook 自动允许（白名单）/ 拦截，而不总是弹窗。
 // 另：可为工具加 danger 标记，让确认闸覆盖更多危险工具（非仅 code_run）。
 
-// 系统提示：告诉 LLM 它的身份、能力边界与基本规则（工具清单本身由函数定义下发，此处不重复罗列以免冗长）
-const SYSTEM_PROMPT = `你是运行在浏览器页面上的轻量 AI 智能体（MiniAgent）。工具是你唯一的能力面，按统一契约声明；只有带 call 的工具才会被直接调用，工具清单与入参见下方函数定义。
+// 系统提示：告诉 LLM 它的身份、能力边界与基本规则（工具清单本身由函数定义下发，此处不重复罗列以免冗长）。
+// 注意：本常量仅供 init() 首次运行写入 config 作种子值；运行期系统提示的唯一真相源是扁平 config 键的 systemPrompt，
+// getSystemPrompt() / orchestrate 等一律只读 config，绝不回退本源码常量（避免"源码 + config"双源定义分歧）。
+export const SYSTEM_PROMPT = `你是运行在浏览器页面上的轻量 AI 智能体（MiniAgent）。工具是你唯一的能力面，按统一契约声明；只有带 call 的工具才会被直接调用，工具清单与入参见下方函数定义。
 
 规则：
 - 需要新能力时，用 tool_manager（action=register）创建工具，提供 name、description、inputSchema、code（call 源码）；必要时加 deps / riskLevel / register（安装钩子）。注册会持久化到 tools 命名空间（重载按依赖拓扑自动重建），但默认处于停用状态；传 enabled=true 可注册后立即启用，或事后在 ⚙ 工具面板开启。
@@ -44,28 +49,47 @@ const SYSTEM_PROMPT = `你是运行在浏览器页面上的轻量 AI 智能体�
 - 可用 orchestrate 查看 / 热更新运行期编排（钩子、系统提示），用 session 管理对话落盘与多会话切换。
 - 回答简明，必要时一句话说明在做什么。`;
 
-// 系统提示可编排：优先读 config:systemPrompt（orchestrate.update 写入），读不到回退源码默认值。
+// 系统提示单一真相源 = 扁平 config 键的 systemPrompt（orchestrate.update 经 saveConfig 写入）。
+// 运行期只认 config，绝不回退源码常量：首次运行由 init() 用源码种子值 SYSTEM_PROMPT 写进 config，
+// 之后读取只走 config，解决"源码 + config"双源定义分歧。
 export function getSystemPrompt(): string {
-  return storage.get<string>('config', 'systemPrompt') ?? SYSTEM_PROMPT;
+  return getConfig().systemPrompt ?? '';
 }
 
-// 配置落盘到 default 命名空间下的 config 键（default:config）
+// 配置落盘到扁平键 config（realKey 空 ns → 无前缀；回退到最初无 ns 设计，用户在 Tampermonkey 数值里可直接编辑）。
+// 惰性迁移：旧 default:config 若存在则自动迁回扁平 config 并删除旧的，兼容历史数据。
 export function getConfig(): AppConfig {
-  const saved = storage.get<Partial<AppConfig>>('default', 'config');
-  return { ...DEFAULT_CONFIG, ...(saved ?? {}) };
+  const flat = storage.get<Partial<AppConfig>>(NS_FLAT, FLAT.CONFIG);
+  if (flat) return { ...DEFAULT_CONFIG, ...flat };
+  const legacy = storage.get<Partial<AppConfig>>(LEGACY.CONFIG.ns, LEGACY.CONFIG.key);
+  if (legacy) {
+    storage.set(NS_FLAT, FLAT.CONFIG, legacy);
+    storage.del(LEGACY.CONFIG.ns, LEGACY.CONFIG.key);
+    return { ...DEFAULT_CONFIG, ...legacy };
+  }
+  return DEFAULT_CONFIG;
 }
 
 export function saveConfig(patch: Partial<AppConfig>): void {
-  storage.set('default', 'config', { ...getConfig(), ...patch });
+  storage.set(NS_FLAT, FLAT.CONFIG, { ...getConfig(), ...patch });
 }
 
 // 引擎动态请求体：合并进每次 streamChat 请求（编排可经 orchestrate.setRequestBody 热更新，无需重载）。
-// 与 default:config（端点 / 鉴权：model/baseURL/apiKey）分离——config 管"连哪个"，baseRequestBody 管"怎么问"
+// 与扁平 config（端点 / 鉴权：model/baseURL/apiKey）分离——config 管"连哪个"，baseRequestBody 管"怎么问"
 // （temperature / max_tokens / reasoning_effort 及厂商扩展字段，甚至可覆盖 model）。编排因此能"知道并编辑"引擎行为。
+// 扁平键 baseRequestBody（与 config 同策略：无 ns 前缀，用户在 Tampermonkey 数值里可直接编辑）。
 const DEFAULT_BASE_REQUEST_BODY: Record<string, unknown> = {};
 export function getBaseRequestBody(): Record<string, unknown> {
-  return storage.get<Record<string, unknown>>('default', 'baseRequestBody') ?? DEFAULT_BASE_REQUEST_BODY;
+  const flat = storage.get<Record<string, unknown>>(NS_FLAT, FLAT.BASE_REQUEST_BODY);
+  if (flat) return flat;
+  const legacy = storage.get<Record<string, unknown>>(LEGACY.BASE_REQUEST_BODY.ns, LEGACY.BASE_REQUEST_BODY.key); // 惰性迁移旧 default:baseRequestBody
+  if (legacy) {
+    storage.set(NS_FLAT, FLAT.BASE_REQUEST_BODY, legacy);
+    storage.del(LEGACY.BASE_REQUEST_BODY.ns, LEGACY.BASE_REQUEST_BODY.key);
+    return legacy;
+  }
+  return DEFAULT_BASE_REQUEST_BODY;
 }
 export function setBaseRequestBody(body: Record<string, unknown>): void {
-  storage.set('default', 'baseRequestBody', body);
+  storage.set(NS_FLAT, FLAT.BASE_REQUEST_BODY, body);
 }

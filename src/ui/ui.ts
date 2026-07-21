@@ -1,7 +1,7 @@
 import { GM_addStyle } from '$';
 import { withHooks } from '../core/withHooks';
 import { executor } from '../core/executor';
-import { renderMarkdown } from '../../tools/marked';
+import { renderMarkdown } from '../tools/marked';
 
 // @require 注入的外部库，运行期在 userscript 全局作用域可用
 declare const DOMPurify: { sanitize(dirty: string, config?: Record<string, unknown>): string; [key: string]: unknown };
@@ -17,11 +17,9 @@ if (_tt) {
 }
 function setHTML(el: Element, html: string): void { el.innerHTML = _hp ? (_hp.createHTML(html) as unknown as string) : html; }
 
-// UI markdown 渲染钩子点：默认用 tools/marked.ts 的 renderMarkdown（依赖全局 marked/DOMPurify，
-// 二者均由 vite.config 的 @require 编译期注入 userscript 全局作用域，运行期直接消费，无运行时下载）；
-// 渲染型工具（如 marked 工具）可在 register 时经 setMarkdownRenderer 接管，unregister 时经
-// resetMarkdownRenderer 还原。这样"自动渲染"由工具自身驱动，核心不依赖某工具，工具离线/卸载即恢复默认渲染器。
-let markdownRenderer: (text: string) => string = renderMarkdown;
+// UI markdown 渲染：直接用 src/tools/marked.ts 的 renderMarkdown（依赖全局 marked/DOMPurify，
+// 二者均由 vite.config 的 @require 编译期注入 userscript 全局作用域，运行期直接消费，无运行时下载）。
+// marked 作为独立工具文件常驻 src（见 ARCHITECTURE §12.5），不接管 UI 渲染；UI 始终用此默认渲染器。
 
 // 玻璃方框浮层（对齐 docs/ui-design.html v4）：容器透明无背景板、无圆角、深色玻璃 + 浅色字、顶部遮罩淡出
 const STYLE = `
@@ -281,24 +279,14 @@ export const ui = {
       bubbles.scrollTop = bubbles.scrollHeight;
     },
 
-    // 替换 / 恢复 markdown 渲染器（供 marked 等渲染型工具接管 UI 渲染）。
-    // setMarkdownRenderer(fn)：fn(text:string)=>string 返回（已清洗的）HTML，接管助手消息与思考渲染。
-    // resetMarkdownRenderer()：恢复默认 renderMarkdown（依赖全局 marked，由 @require 注入）。
-    setMarkdownRenderer(fn: (text: string) => string): void {
-      markdownRenderer = fn;
-    },
-    resetMarkdownRenderer(): void {
-      markdownRenderer = renderMarkdown;
-    },
-
     // 流结束：assistant 正文 + think 正文做 markdown 渲染（一次性，避免流式频繁 setHTML）。
-    // 渲染走可替换的 markdownRenderer（默认 renderMarkdown；marked 工具注册后由其接管）。
+    // 渲染走默认 renderMarkdown（依赖全局 marked，由 @require 注入；marked 工具不接管 UI 渲染）。
     finalizeLast(role: string, text: string, reasoning?: string): void {
       const el = role === 'assistant' ? lastAssistantEl : null;
       if (!el) return;
-      const c = el.querySelector('.ma-md-content') as HTMLElement; if (c) setHTML(c, markdownRenderer(text));
+      const c = el.querySelector('.ma-md-content') as HTMLElement; if (c) setHTML(c, renderMarkdown(text));
       const think = el.querySelector('.ma-think') as HTMLElement;
-      if (think) { if (reasoning) { const tb = el.querySelector('.ma-think-body') as HTMLElement; if (tb) setHTML(tb, markdownRenderer(reasoning)); } else think.remove(); }
+      if (think) { if (reasoning) { const tb = el.querySelector('.ma-think-body') as HTMLElement; if (tb) setHTML(tb, renderMarkdown(reasoning)); } else think.remove(); }
     },
 
     // 运行态：发送变身停止（绑 onStop=agent.chatStop）并禁用输入

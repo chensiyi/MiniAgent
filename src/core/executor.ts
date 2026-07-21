@@ -1,4 +1,6 @@
 import { storage } from './storage';
+import { NS, FLAT, NS_FLAT, OVERVIEW_NS } from './keys';
+import { markedTool } from '../tools/marked';
 import { llm } from './llm';
 import { REQUIRE_CODE_APPROVAL, APPROVAL_RISK_LEVEL, riskAtLeast, getConfig, saveConfig, getSystemPrompt, getBaseRequestBody, setBaseRequestBody } from '../model/config';
 import { withHooks, type HookedFunction } from './withHooks';
@@ -12,10 +14,12 @@ export const requestApproval = withHooks(async function (
 ): Promise<boolean> {
   const ext = agentRef && (agentRef as unknown as { extensions?: Map<string, unknown> }).extensions;
   const fn = ext && typeof ext.get === 'function' ? ext.get('approval') : null;
-  if (typeof fn === 'function') return (fn as (c: { name: string; code?: string; riskLevel?: string }) => Promise<boolean>)(call);
-      console.warn(`[MiniAgent] 无审批闸（UI 未挂载），自动放行：${call.name}`);
-      return true;
-    });
+  if (typeof fn === 'function') {
+    return (fn as (c: { name: string; code?: string; riskLevel?: string }) => Promise<boolean>)(call);
+  }
+  console.warn(`[MiniAgent] 无审批闸（UI 未挂载），自动放行：${call.name}`);
+  return true;
+});
 
 // executor 的结构化视图（避免 typeof executor 前向引用）
 export interface ExecutorLike {
@@ -116,13 +120,29 @@ const RESERVED = new Set<string>([
 const registry = new Map<string, ToolDef>();
 let _agent: AgentLike | null = null;
 
-// 把源码串编译成函数（call / register / unregister 共用沙箱编译）。剥离末尾分号避免语法错误。
-// 注：exportToolToJs 内联的 buildFn 复用同一编译表达式 new Function('"use strict"; return (' + c + ');')，
-// 两处刻意平行（不抽公共 helper），保持"运行期编译"与"导出可重注册片段"对称可读。
+// === 顶层用户代码编译规范（沙箱）===
+// 运行期任何动态编译（工具 call/register/unregister 重建、code_run 自我执行、orchestrate 用户钩子）
+// 必须经由下方统一入口，禁止在调用链路里散落裸 new Function。统一点：
+//   1) 强制 "use strict"；
+//   2) 仅暴露显式注入的形参（ctx / opts / agent…，绝不暴露模块作用域或全局敏感对象）；
+//   3) 编译失败原样抛出，由调用方 try/catch 转成用户可读错误。
+// 这样沙箱边界只在一处定义，便于审计与加固（用户 2026-07-21）。
+const SANDBOX_HEADER = '"use strict";\n';
+
+// 唯一底层构造器：所有编译入口共用，确保沙箱定义不分叉、可一处审计。
+function createSandboxFn(argNames: string[], body: string): (...a: any[]) => any {
+  return new Function(...argNames, SANDBOX_HEADER + body) as (...a: any[]) => any;
+}
+
+// 编译"函数表达式"源码（工具描述符的 call/register/unregister 是 (args,ctx)=>… 表达式）。
 function compileFn(code: string): (...a: any[]) => any {
   const c = code.trim().replace(/;\s*$/, '');
-  const fn = new Function('"use strict"; return (' + c + ');');
-  return fn() as (...a: any[]) => any;
+  return createSandboxFn([], `return (${c});`) as (...a: any[]) => any;
+}
+
+// 编译"函数体"源码（code_run / 用户钩子：拿注入的形参直接执行）。
+function compileBody(argNames: string[], code: string): (...a: any[]) => any {
+  return createSandboxFn(argNames, code);
 }
 
 // 由持久化描述符构造最小 ToolDef：call 永远由 code 编译（重建即重编译）；register/unregister 可选。
@@ -244,7 +264,7 @@ export function exportToolToJs(desc: ToolDesc): string {
   parts.push('  };');
   parts.push('  const tool = { ...desc, call: buildFn(desc.code), register: buildFn(desc.register), unregister: buildFn(desc.unregister) };');
   parts.push('  executor.register(tool);'); // 注册（含依赖校验/同名替换）
-  parts.push('  if (storage) storage.set("tools", desc.name, desc);'); // 持久化（含内联库源码，重载自动重建）
+  parts.push('  if (storage) storage.set("tools", desc.name, desc);'); // 持久化（含内联库源码，重载自动重建）。注意：此行为生成的"自包含安装片段"，刻意保留字面量 "tools" 以便独立安装，不引用 keys.ts
   parts.push('  console.log("[MiniAgent] 已注册并持久化工具:", desc.name);');
   parts.push('})();');
   return header + '\n' + parts.join('\n');
@@ -301,7 +321,7 @@ async function deleteTool(name: string, agent: AgentLike): Promise<string> {
   if (!confirmed) return '已取消';
   const persisted = storage.get<ToolDesc>('tools', name);
   if (persisted) {
-    storage.del('tools', name); // 移除持久化（自编排工具真相源）
+    storage.del(NS.TOOLS, name); // 移除持久化（自编排工具真相源）
   } else {
     // 内置工具：无 tools 命名空间描述符 → 追加黑名单，重载不回注
     const cfg = getConfig();
@@ -458,7 +478,7 @@ export const executor = {
     const desc = storage.get<ToolDesc>('tools', name);
     if (desc) {
       desc.enabled = enabled;
-      storage.set('tools', name, desc);
+      storage.set(NS.TOOLS, name, desc);
     } else {
       const cfg = getConfig();
       const set = new Set(cfg.disabledTools ?? []);
@@ -541,7 +561,7 @@ export const executor = {
 
   // 重建用户钩子：读 hooks 命名空间全部描述符 → 编译 → 挂接到运行期钩子数组（镜像 rehydrateTools）。
   rehydrateHooks(agentRef: AgentLike): void {
-    for (const id of storage.keys('hooks')) {
+    for (const id of storage.keys(NS.HOOKS)) {
       const desc = storage.get<{ id: string; name: string; target: string; phase: string; code: string }>('hooks', id);
       if (!desc || !desc.code) continue;
       const target = resolveTarget(desc.target, agentRef);
@@ -611,7 +631,7 @@ const gmStorageTool: ToolDef = {
   },
   call: async (args, ctx) => {
     const action = String(args.action ?? '');
-    const ns = String(args.ns ?? 'memory');
+    const ns = String(args.ns ?? NS.MEMORY);
     switch (action) {
       case 'get': {
         const key = String(args.key ?? '');
@@ -630,19 +650,20 @@ const gmStorageTool: ToolDef = {
             ? { ...(existing as Record<string, unknown>), ...(incoming as Record<string, unknown>) }
             : incoming;
           ctx.storage.set(ns, key, merged);
-          return `已合并保存 ${ns}:${key}`;
+          return `已合并保存 ${ns ? ns + ':' : ''}${key}`;
         }
         ctx.storage.set(ns, key, args.value);
-        return `已保存 ${ns}:${key}`;
+        return `已保存 ${ns ? ns + ':' : ''}${key}`;
       }
       case 'list': {
         if (args.ns) {
           const keys = storage.keys(ns).sort((a, b) => a.localeCompare(b));
           return JSON.stringify({ ns, count: keys.length, keys });
         }
-        const NS = ['default', 'config', 'sessions', 'tools', 'code', 'memory'];
         const overview: Record<string, string[]> = {};
-        for (const n of NS) overview[n] = storage.keys(n).sort((a, b) => a.localeCompare(b));
+        for (const n of OVERVIEW_NS) overview[n] = storage.keys(n).sort((a, b) => a.localeCompare(b));
+        // 扁平键（config / baseRequestBody / sessions 等，无 ns 前缀）单列，避免概览里消失
+        overview.flat = storage.keys().filter((k) => !k.includes(':')).sort((a, b) => a.localeCompare(b));
         return JSON.stringify(overview);
       }
       case 'del': {
@@ -676,9 +697,10 @@ const codeRunTool: ToolDef = {
   },
   call: (args, ctx) => {
     const code = args.code as string;
-    if (!code|| code.length === 0) return '没有可执行的代码';
+    if (!code || code.length === 0) return '没有可执行的代码';
     try {
-      const fn = new Function('ctx', `"use strict";\n${code}`);
+      // 经顶层沙箱规范编译（统一 "use strict" + 仅注入 ctx），不再散落裸 new Function
+      const fn = compileBody(['ctx'], code);
       const result = fn(ctx);
       return `执行成功 → ${result === undefined ? '(无返回值)' : JSON.stringify(result)}`;
     } catch (e) {
@@ -771,7 +793,7 @@ const toolManagerTool: ToolDef = {
         // 确认框展示用户原始 code（不含内联库源码，避免冗长）
         const confirmed = await requestApproval({ name: `tool_manager.register(${name})`, code: String(args.code ?? ''), riskLevel: 'high' }, ctx.agent);
         if (!confirmed) return '已取消';
-        ctx.storage.set('tools', name, desc); // 持久化（真相源，含内联库）
+        ctx.storage.set(NS.TOOLS, name, desc); // 持久化（真相源，含内联库）
         // 默认停用：仅持久化、不进运行期注册表（不进 LLM 清单、不可调用）；enabled=true 才注册（含依赖校验；同名则替换）
         if (!enabled) return `已创建工具 ${name}（依赖已内联，已持久化；当前为停用状态，可在 ⚙ 工具面板或 setEnabled 开启）`;
         const ok = ctx.executor.register(tool);
@@ -855,7 +877,7 @@ function resolveTarget(name: string, agentRef: AgentLike): HookedFunction | null
 
 // 把钩子体编译成安全包装函数：用户 fn 抛错不会影响主循环；打 __userHook/__name 标记供 view 区分来源。
 function compileHook(code: string, name: string, agentRef: AgentLike): ((opts: any) => void) & Record<string, unknown> {
-  const userFn = new Function('opts', 'agent', 'storage', 'executor', 'console', code) as (
+  const userFn = compileBody(['opts', 'agent', 'storage', 'executor', 'console'], code) as (
     opts: any,
     agent: any,
     storage: any,
@@ -878,7 +900,7 @@ const orchestrateTool: ToolDef = {
   name: 'orchestrate',
   author: 'sys',
   description:
-    '系统编排管理：查看并热更新当前智能体的"编排"（运行期钩子 + 系统提示 + 引擎请求体 + 工具面）。action 取值 view（查看实时编排快照：系统提示 + 各钩子目标 sendMessage/engine/run/streamChat/chat/requestApproval/storageSet 的运行期钩子清单（含 name 与 id）+ 工具清单 + 引擎（endpoint 的 model/baseURL，来自 default:config；以及可热更新的 baseRequestBody 请求模板，覆盖 model/temperature/max_tokens/reasoning_effort 及厂商扩展字段））/ update（改写系统提示并热生效，需传 systemPrompt）/ setRequestBody（热更新 baseRequestBody 请求模板，需传 baseRequestBody 的 JSON 字符串，影响后续每次请求，无需重载）/ addHook（热挂接用户钩子，需传 name/target/phase/code；code 为钩子体，签名 (opts, agent, storage, executor, console)，可经 opts.args 改写请求体（streamChat.before 里改 opts.args[0].messages/.tools/.model/温度等即可在请求发出前编辑完整 ChatRequestBody））/ removeHook（移除用户钩子，需传 hookId 或 name；按 name 移除所有同名用户钩子）。update/setRequestBody/addHook/removeHook 执行前均弹确认框。',
+    '系统编排管理：查看并热更新当前智能体的"编排"（运行期钩子 + 系统提示 + 引擎请求体 + 工具面）。action 取值 view（查看实时编排快照：系统提示 + 各钩子目标 sendMessage/engine/run/streamChat/chat/requestApproval/storageSet 的运行期钩子清单（含 name 与 id）+ 工具清单 + 引擎（endpoint 的 model/baseURL，来自扁平 config 键；以及可热更新的 baseRequestBody 请求模板，覆盖 model/temperature/max_tokens/reasoning_effort 及厂商扩展字段））/ update（改写系统提示并热生效，需传 systemPrompt）/ setRequestBody（热更新 baseRequestBody 请求模板，需传 baseRequestBody 的 JSON 字符串，影响后续每次请求，无需重载）/ addHook（热挂接用户钩子，需传 name/target/phase/code；code 为钩子体，签名 (opts, agent, storage, executor, console)，可经 opts.args 改写请求体（streamChat.before 里改 opts.args[0].messages/.tools/.model/温度等即可在请求发出前编辑完整 ChatRequestBody））/ removeHook（移除用户钩子，需传 hookId 或 name；按 name 移除所有同名用户钩子）。update/setRequestBody/addHook/removeHook 执行前均弹确认框。',
   inputSchema: {
     type: 'object',
     properties: {
@@ -941,7 +963,7 @@ const orchestrateTool: ToolDef = {
       if (!ok) return '已取消';
       const sp = String(args.systemPrompt ?? '');
       if (!sp) return 'systemPrompt 不能为空';
-      storage.set('config', 'systemPrompt', sp);
+      saveConfig({ systemPrompt: sp }); // 统一写入扁平 config（跟随 config）
       // 热生效：替换 agent.messages 里 role=system 那条（有则改，无则 unshift），当下会话即应用
       const msgs = ctx.agent.messages;
       const i = msgs.findIndex((m: any) => m.role === 'system');
@@ -985,7 +1007,7 @@ const orchestrateTool: ToolDef = {
       }
       wrapped.__hookId = id;
       (target as any)[phase + 'Exe'].push(wrapped);
-      storage.set('hooks', id, { id, name, target: String(args.target), phase, code: codeStr });
+      storage.set(NS.HOOKS, id, { id, name, target: String(args.target), phase, code: codeStr });
       return `已挂接用户钩子 ${name} → ${args.target}.${phase}（id=${id}），刷新不丢`;
     }
     if (action === 'removeHook') {
@@ -1009,11 +1031,11 @@ const orchestrateTool: ToolDef = {
         }
       }
       // 同步清理持久化（hooks 命名空间）
-      if (id) storage.del('hooks', id);
+      if (id) storage.del(NS.HOOKS, id);
       else if (name) {
-        for (const hid of storage.keys('hooks')) {
+        for (const hid of storage.keys(NS.HOOKS)) {
           const d = storage.get<{ name?: string }>('hooks', hid);
-          if (d && d.name === name) storage.del('hooks', hid);
+          if (d && d.name === name) storage.del(NS.HOOKS, hid);
         }
       }
       return removed ? `已移除 ${removed} 个钩子（id=${id || '-'} name=${name || '-'}）` : `未找到匹配钩子（id=${id || '-'} name=${name || '-'}）`;
@@ -1022,10 +1044,10 @@ const orchestrateTool: ToolDef = {
   },
 };
 
-// 9) 会话管理：注册后自动把对话消息落盘到 session 命名空间（session:<id>），并在 default:sessions 建索引。
+// 9) 会话管理：注册后自动把对话消息落盘到 session 命名空间（session:<id>），并在扁平键 sessions 建索引。
 //    register = 安装/重建入口：生成 sessionId、向 agent.sendMessage 挂载 afterExe 钩子。
 //    注意【惰性创建】：注册时不再立即写空记录，而是首次真实对话（afterExe 触发）才创建
-//    session:<id> 记录并写入 default:sessions 索引——避免每次页面刷新都产生空会话污染存储。
+//    session:<id> 记录并写入扁平 sessions 索引——避免每次页面刷新都产生空会话污染存储。
 //    幂等：避免重复注册累积 afterExe 钩子；unregister 时移除该钩子（防泄漏）。
 //    支持 action：info / save / list / create / switch / remove（详见 inputSchema）。
 //    模块级状态：钩子引用 + 当前 sessionId（重注册时更新，避免 stale-id 持续写盘）。
@@ -1036,13 +1058,13 @@ let currentSessionId = '';
 function flushSession(agent: AgentLike, st: typeof storage): void {
   const id = currentSessionId;
   if (!id) return;
-  const cur = st.get('session', id);
+  const cur = st.get(NS.SESSION, id);
   if (!cur) {
-    const idx = st.get<string[]>('default', 'sessions') ?? [];
-    if (!idx.includes(id)) { idx.push(id); st.set('default', 'sessions', idx); }
-    st.set('session', id, { id, createdAt: Date.now(), messages: [...agent.messages] });
+    const idx = st.get<string[]>('', 'sessions') ?? [];
+    if (!idx.includes(id)) { idx.push(id); st.set(NS_FLAT, FLAT.SESSIONS, idx); }
+    st.set(NS.SESSION, id, { id, createdAt: Date.now(), messages: [...agent.messages] });
   } else {
-    st.set('session', id, { ...cur, messages: [...agent.messages] });
+    st.set(NS.SESSION, id, { ...cur, messages: [...agent.messages] });
   }
 }
 
@@ -1050,7 +1072,7 @@ const sessionTool: ToolDef = {
   name: 'session',
   author: 'sys',
   description:
-    '会话管理：注册后自动把对话消息落盘到 session 命名空间（session:<id>），并在 default:sessions 建索引。' +
+    '会话管理：注册后自动把对话消息落盘到 session 命名空间（session:<id>），并在扁平 sessions 建索引。' +
     'action：info=查看当前会话(默认)；save=立即落盘；list=列出全部会话；create=开新会话并清空上下文；' +
     'switch=切换到指定会话(id必填)；remove=删除指定会话(id必填，删当前则自动开新会话)。',
   inputSchema: {
@@ -1068,21 +1090,21 @@ const sessionTool: ToolDef = {
     currentSessionId = genSessionId();
     ctx.agent.sessionId = currentSessionId;
     // 注册时【不】立即落盘空记录：改为首次真实对话时惰性创建（见下方 persist 钩子），
-    // 避免每次页面刷新都无条件新建一条空会话、污染 session 命名空间与 default:sessions 索引。
+    // 避免每次页面刷新都无条件新建一条空会话、污染 session 命名空间与扁平 sessions 索引。
     // 安装自动落盘（幂等：仅首次挂钩子，重注册复用同一引用；id 走模块级，避免累积/泄漏）
     if (!sessionPersistHook) {
       sessionPersistHook = () => {
         const id = currentSessionId;
         if (!id) return;
-        const cur = ctx.storage.get('session', id);
+        const cur = ctx.storage.get(NS.SESSION, id);
         if (!cur) {
           // 惰性初始化：首次落盘才创建记录并写入会话索引（仅在确有对话时）
-          const idx = ctx.storage.get<string[]>('default', 'sessions') ?? [];
-          if (!idx.includes(id)) { idx.push(id); ctx.storage.set('default', 'sessions', idx); }
-          ctx.storage.set('session', id, { id, createdAt: Date.now(), messages: [...ctx.agent.messages] });
+          const idx = ctx.storage.get<string[]>('', 'sessions') ?? [];
+          if (!idx.includes(id)) { idx.push(id); ctx.storage.set(NS_FLAT, FLAT.SESSIONS, idx); }
+          ctx.storage.set(NS.SESSION, id, { id, createdAt: Date.now(), messages: [...ctx.agent.messages] });
           return;
         }
-        ctx.storage.set('session', id, { ...cur, messages: [...ctx.agent.messages] });
+        ctx.storage.set(NS.SESSION, id, { ...cur, messages: [...ctx.agent.messages] });
       };
       Object.assign(sessionPersistHook!, { __coreHook: true, __name: '会话落盘', __hookId: 'sys-session-persist' });
       ctx.agent.sendMessage.afterExe.push(sessionPersistHook);
@@ -1102,7 +1124,7 @@ const sessionTool: ToolDef = {
 
     // list：列出全部会话（标注 current）
     if (action === 'list') {
-      const idx = ctx.storage.get<string[]>('default', 'sessions') ?? [];
+      const idx = ctx.storage.get<string[]>('', 'sessions') ?? [];
       const list = idx.map((sid) => {
         const rec = ctx.storage.get<{ createdAt?: number; messages?: unknown[] }>('session', sid);
         return { id: sid, current: sid === currentSessionId, createdAt: rec?.createdAt ?? null, messageCount: rec?.messages?.length ?? 0 };
@@ -1117,9 +1139,9 @@ const sessionTool: ToolDef = {
       currentSessionId = newId;
       ctx.agent.sessionId = newId;
       ctx.agent.messages = [];
-      const idx = ctx.storage.get<string[]>('default', 'sessions') ?? [];
-      if (!idx.includes(newId)) { idx.push(newId); ctx.storage.set('default', 'sessions', idx); }
-      ctx.storage.set('session', newId, { id: newId, createdAt: Date.now(), messages: [] });
+      const idx = ctx.storage.get<string[]>('', 'sessions') ?? [];
+      if (!idx.includes(newId)) { idx.push(newId); ctx.storage.set(NS_FLAT, FLAT.SESSIONS, idx); }
+      ctx.storage.set(NS.SESSION, newId, { id: newId, createdAt: Date.now(), messages: [] });
       return `已创建新会话 ${newId}（上下文已清空，旧会话已保存）`;
     }
 
@@ -1140,20 +1162,20 @@ const sessionTool: ToolDef = {
     if (action === 'remove') {
       const target = String(args.id ?? '');
       if (!target) return '参数 id 缺失（要删除的会话 id）';
-      const rec = ctx.storage.get('session', target);
+      const rec = ctx.storage.get(NS.SESSION, target);
       if (!rec) return `会话不存在: ${target}`;
-      ctx.storage.del('session', target);
-      const idx = ctx.storage.get<string[]>('default', 'sessions') ?? [];
+      ctx.storage.del(NS.SESSION, target);
+      const idx = ctx.storage.get<string[]>('', 'sessions') ?? [];
       const ni = idx.filter((x) => x !== target);
-      if (ni.length !== idx.length) ctx.storage.set('default', 'sessions', ni);
+      if (ni.length !== idx.length) ctx.storage.set(NS_FLAT, FLAT.SESSIONS, ni);
       if (target === currentSessionId) {
         const newId = genSessionId();
         currentSessionId = newId;
         ctx.agent.sessionId = newId;
         ctx.agent.messages = [];
-        const ni2 = ctx.storage.get<string[]>('default', 'sessions') ?? [];
-        if (!ni2.includes(newId)) { ni2.push(newId); ctx.storage.set('default', 'sessions', ni2); }
-        ctx.storage.set('session', newId, { id: newId, createdAt: Date.now(), messages: [] });
+        const ni2 = ctx.storage.get<string[]>('', 'sessions') ?? [];
+        if (!ni2.includes(newId)) { ni2.push(newId); ctx.storage.set(NS_FLAT, FLAT.SESSIONS, ni2); }
+        ctx.storage.set(NS.SESSION, newId, { id: newId, createdAt: Date.now(), messages: [] });
         return `已删除当前会话 ${target}，并开启新会话 ${newId}`;
       }
       return `已删除会话 ${target}`;
@@ -1167,7 +1189,7 @@ const sessionTool: ToolDef = {
       return `已落盘会话 ${id}（${ctx.agent.messages.length} 条消息）`;
     }
     // 默认 info
-    const stored = ctx.storage.get('session', id);
+    const stored = ctx.storage.get(NS.SESSION, id);
     return JSON.stringify({ id, messageCount: ctx.agent.messages.length, persisted: !!stored });
   },
 };
@@ -1180,6 +1202,7 @@ export const defaultTools: ToolDef[] = [
   toolManagerTool,
   orchestrateTool,
   sessionTool,
+  markedTool,
 ];
 
 // 由宿主（agent.ts）注入的额外内置工具（UI 等）。executor 不 import ui 以保持核心解耦；
