@@ -332,13 +332,6 @@ function mount(): void {
   agent.output = ui.chat; // UI 接管输出槽（agent.output 默认 headless 空实现）
   agent.extensions.set('ui', ui.chat); // 渲染型工具（如 marked）经此接管 UI 渲染
   agent.extensions.set('approval', ui.requestApproval); // 确认闸经此接入（核心 requestApproval 委托）
-  // 关闭 UI 的风险操作确认后，由 UI 调 ui.onClose 还原核心到 headless 状态：
-  // 输出槽回到空实现、断开 'ui'/'approval' 能力（核心照常运行，只是失去交互通道，高风险操作自动放行）。
-  ui.onClose = (): void => {
-    agent.output = headlessSink;
-    agent.extensions.delete('ui');
-    agent.extensions.delete('approval');
-  };
   ui.chat.mount((text) => {
     // 用户直接调用工具：/tool_name /param value
     if (text.startsWith('/')) {
