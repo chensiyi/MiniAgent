@@ -210,6 +210,15 @@ UI 不是核心的一部分，而是一个**可插拔组件**（概念上的 too
 | 渲染接管（marked 等） | `setMarkdownRenderer` 生效 | 工具 `register` 静默跳过（不崩） |
 | 确认闸 | UI 弹确认气泡 | 自动放行（自动化场景） |
 
-### 11.3 目标终点
+### 11.3 关闭 UI 是风险操作（须经确认闸）
+
+"关闭/卸载 UI"会**断开核心与用户的交互通道**（卸载 DOM 且还原 headless 连接），关闭后需重载脚本才能恢复交互，因此**必须视为风险操作、经 `requestApproval` 确认闸**，绝不静默发生：
+
+- UI 面板提供"关闭界面"入口（`✕` 按钮，右上角），点击触发 `ui.requestCloseUI()`。
+- `requestCloseUI()` 先 `await ui.requestApproval({ name: 'ui.close（关闭界面）', riskLevel: 'high' })`；**用户拒绝则不做任何事**（DOM 与连接保持）。
+- 仅确认后才：`root.remove()` 卸载 DOM，并调 `ui.onClose()`（由 `mount()` 注入）——把 `agent.output` 还原为 headless 空实现、从 `agent.extensions` 删除 `'ui'` 与 `'approval'`，核心回到纯 headless 运行（高风险操作此后自动放行）。
+- headless 下本就无 UI，`requestCloseUI` 无从触发；确认闸本身在 headless 下也不存在（无 UI 可弹），故该约束只在 UI 存在时生效，与"核心可无 UI 运行"不冲突。
+
+### 11.4 目标终点
 
 UI 彻底成为 `tool_manager` 可实例化的 tool：以 `register`/`unregister` 钩子挂载 / 卸载 DOM（开启即挂载、关闭即卸载），核心完全 headless 可独立运行于 CLI / 服务场景。当前 UI 经 `mount()` 单一接入点挂载，已满足"核心不依赖 UI"的强约束；后续可把 `mount()` 改为经 `tool_manager register` 触发，使 UI 与其他 tool 同等地位。

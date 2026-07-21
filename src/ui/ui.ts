@@ -70,6 +70,8 @@ const STYLE = `
 .ma-md-content a{color:#6fb0f0}
 .ma-toggle{display:block;width:100%;padding:2px 0;margin:0;text-align:center;border:1px solid var(--glass-border);background:var(--glass);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);color:var(--text);cursor:pointer;font-size:11px;line-height:1.3}
 .ma-toggle:hover{background:rgba(255,255,255,.16)}
+.ma-close{position:absolute;top:3px;right:4px;z-index:6;width:18px;height:18px;line-height:16px;padding:0;border:1px solid var(--glass-border);background:var(--glass);color:var(--risk-high);cursor:pointer;font-size:12px;text-align:center}
+.ma-close:hover{background:rgba(255,255,255,.16)}
 .ma-collapsed .ma-bubbles,.ma-collapsed .ma-input-row,.ma-collapsed .ma-tools-panel{display:none}
 `;
 
@@ -180,6 +182,7 @@ export const ui = {
       root = document.createElement('div'); root.id = 'miniagent-root';
       setHTML(root, `
         <button class="ma-toggle" type="button" title="折叠/展开面板">▾</button>
+        <button class="ma-close" type="button" title="关闭界面（风险操作，需确认）">✕</button>
         <div class="ma-bubbles"></div>
         <div class="ma-input-row">
           <button class="ma-tools" type="button" title="工具开关">⚙</button>
@@ -202,6 +205,8 @@ export const ui = {
       toolsBtn.onclick = () => ui.tools.toggle();
       toggleBtnEl = root.querySelector('.ma-toggle') as HTMLButtonElement;
       toggleBtnEl.onclick = () => ui.panel.toggle();
+      const closeBtnEl = root.querySelector('.ma-close') as HTMLButtonElement | null;
+      if (closeBtnEl) closeBtnEl.onclick = () => void ui.requestCloseUI();
       const doSend = (): void => {
         const text = input.value.trim(); if (!text) return;
         input.value = ''; if (acEl) acEl.style.display = 'none'; onSendRef?.(text);
@@ -347,4 +352,14 @@ export const ui = {
       (el.querySelector('.no') as HTMLButtonElement).onclick = () => finish(false);
       bubbles.append(el); bubbles.scrollTop = bubbles.scrollHeight;
     })),
+
+  // 关闭/卸载 UI：风险操作（断开核心交互通道，关闭后需重载脚本才能恢复交互），
+  // 必须经 requestApproval 确认闸；确认后才卸载 DOM 并通知核心还原 headless 连接。
+  onClose: undefined as (() => void) | undefined,
+  async requestCloseUI(): Promise<void> {
+    const ok = await ui.requestApproval({ name: 'ui.close（关闭界面）', riskLevel: 'high' });
+    if (!ok) return;
+    if (root && root.parentNode) root.parentNode.removeChild(root);
+    ui.onClose?.();
+  },
 };
