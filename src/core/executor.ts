@@ -24,7 +24,7 @@ export interface ExecutorLike {
   unregister(name: string): void;
   registerAll(tools: ToolDef[]): { registered: string[]; rejected: string[] };
   list(includeAll?: boolean): ToolDef[];
-  setEnabled(name: string, enabled: boolean): void;
+  setEnabled(name: string, enabled: boolean): Promise<void>;
   rehydrateHooks(agent: AgentLike): void;
   allToolStates(): { name: string; author?: string; enabled: boolean; builtin: boolean; description?: string }[];
   run(call: ToolCall, agentArg?: AgentLike): Promise<string>;
@@ -110,6 +110,7 @@ const RESERVED = new Set<string>([
   'messages', 'messageQueue', 'toolCallQueue', 'sessionId', 'storage', 'llm',
   'executor', '_engineActive', 'isRunning', 'chatStop', 'engine',
   'sendMessage', 'chat', 'tools', 'orchestrateSystemPrompt',
+  'ui', 'output', 'extensions', // UI 作为 tool：禁止把工具挂成 agent.ui / 覆盖核心 output/extensions（解耦铁律）
 ]);
 
 const registry = new Map<string, ToolDef>();
@@ -393,7 +394,13 @@ export const executor = {
   },
 
   // 启停：自编排工具改 tools:<name>.enabled 并持久化；内置工具改 config.disabledTools 黑名单并持久化；均即时 register/unregister。
-  setEnabled(name: string, enabled: boolean): void {
+  // 关闭 UI（ui 这个 tool 被禁用）是风险操作：须经确认闸（agent.extensions 的 'approval'，headless 自动放行）；
+  // 用户拒绝则保持原状、什么都不做（调用方负责还原开关视觉）。开启 UI 不确认（安全、可逆）。
+  async setEnabled(name: string, enabled: boolean): Promise<void> {
+    if (!enabled && name === 'ui') {
+      const ok = await requestApproval({ name: 'ui.disable（关闭界面）', riskLevel: 'high' }, _agent ?? undefined);
+      if (!ok) return;
+    }
     const desc = storage.get<ToolDesc>('tools', name);
     if (desc) {
       desc.enabled = enabled;
@@ -413,7 +420,7 @@ export const executor = {
           console.warn('[MiniAgent] 重注册失败:', name, e);
         }
       } else {
-        const bt = defaultTools.find((t) => t.name === name);
+        const bt = [...defaultTools, ...extraBuiltinTools].find((t) => t.name === name);
         if (bt) executor.register(bt);
       }
     } else {
@@ -425,7 +432,7 @@ export const executor = {
   allToolStates(): { name: string; author?: string; enabled: boolean; builtin: boolean; description?: string }[] {
     const registered = new Set(registry.keys());
     const states: { name: string; author?: string; enabled: boolean; builtin: boolean; description?: string }[] = [];
-    for (const t of defaultTools) {
+    for (const t of [...defaultTools, ...extraBuiltinTools]) {
       states.push({ name: t.name, author: t.author, enabled: registered.has(t.name), builtin: true, description: t.description });
     }
     for (const desc of storage.listToolDefs()) {
@@ -817,17 +824,17 @@ const orchestrateTool: ToolDef = {
   name: 'orchestrate',
   author: 'sys',
   description:
-    '系统编排管理：查看并热更新当前智能体的"编排"（运行期钩子 + 系统提示 + 引擎请求体 + 工具面）。action 取值 view（查看实时编排快照：系统提示 + 各钩子目标 sendMessage/engine/run/streamChat/chat/requestApproval/storageSet 的运行期钩子清单（含 name 与 id）+ 工具清单 + 引擎（endpoint 的 model/baseURL，来自 default:config；以及可热更新的 baseRequestBody 请求模板，覆盖 model/temperature/max_tokens/reasoning_effort 及厂商扩展字段））/ update（改写系统提示并热生效，需传 systemPrompt）/ setEngine（热更新 baseRequestBody 请求模板，需传 baseRequestBody 的 JSON 字符串，影响后续每次请求，无需重载）/ addHook（热挂接用户钩子，需传 name/target/phase/code；code 为钩子体，签名 (opts, agent, storage, executor, console)，可经 opts.args 改写请求/消息，如在 streamChat.before 里改 opts.args[0].messages 即可在请求发出前编辑内容）/ removeHook（移除用户钩子，需传 hookId 或 name；按 name 移除所有同名用户钩子）。update/setEngine/addHook/removeHook 执行前均弹确认框。',
+    '系统编排管理：查看并热更新当前智能体的"编排"（运行期钩子 + 系统提示 + 引擎请求体 + 工具面）。action 取值 view（查看实时编排快照：系统提示 + 各钩子目标 sendMessage/engine/run/streamChat/chat/requestApproval/storageSet 的运行期钩子清单（含 name 与 id）+ 工具清单 + 引擎（endpoint 的 model/baseURL，来自 default:config；以及可热更新的 baseRequestBody 请求模板，覆盖 model/temperature/max_tokens/reasoning_effort 及厂商扩展字段））/ update（改写系统提示并热生效，需传 systemPrompt）/ setRequestBody（热更新 baseRequestBody 请求模板，需传 baseRequestBody 的 JSON 字符串，影响后续每次请求，无需重载）/ addHook（热挂接用户钩子，需传 name/target/phase/code；code 为钩子体，签名 (opts, agent, storage, executor, console)，可经 opts.args 改写请求体（streamChat.before 里改 opts.args[0].messages/.tools/.model/温度等即可在请求发出前编辑完整 ChatRequestBody））/ removeHook（移除用户钩子，需传 hookId 或 name；按 name 移除所有同名用户钩子）。update/setRequestBody/addHook/removeHook 执行前均弹确认框。',
   inputSchema: {
     type: 'object',
     properties: {
       action: {
         type: 'string',
-        enum: ['view', 'update', 'setEngine', 'addHook', 'removeHook'],
-        description: 'view=查看快照(默认)；update=改写系统提示；setEngine=热更新 baseRequestBody 请求模板；addHook=挂接用户钩子；removeHook=移除用户钩子',
+        enum: ['view', 'update', 'setRequestBody', 'addHook', 'removeHook'],
+        description: 'view=查看快照(默认)；update=改写系统提示；setRequestBody=热更新 baseRequestBody 请求模板；addHook=挂接用户钩子；removeHook=移除用户钩子',
       },
       systemPrompt: { type: 'string', description: 'update 时用的新系统提示全文' },
-      baseRequestBody: { type: 'string', description: 'setEngine 时的 baseRequestBody 请求模板 JSON 字符串（如 {"temperature":0.7,"reasoning_effort":"medium"}；可含 model 覆盖默认模型及厂商扩展字段）。整体替换，影响后续每次请求。' },
+      baseRequestBody: { type: 'string', description: 'setRequestBody 时的 baseRequestBody 请求模板 JSON 字符串（如 {"temperature":0.7,"reasoning_effort":"medium"}；可含 model 覆盖默认模型及厂商扩展字段）。整体替换，影响后续每次请求。' },
       name: { type: 'string', description: 'addHook 时钩子显示名；removeHook 时按名移除（移除所有同名用户钩子）。与 hookId 二选一' },
       target: {
         type: 'string',
@@ -837,7 +844,7 @@ const orchestrateTool: ToolDef = {
       phase: { type: 'string', enum: ['before', 'after'], description: 'addHook 时 before/after 阶段（默认 before）' },
       code: {
         type: 'string',
-        description: 'addHook 时的钩子体源码。会被包成 (opts, agent, storage, executor, console) => void：可通过改写 opts.args 影响请求/消息（如在 streamChat.before 里改 opts.args[0].messages 即可在请求发出前编辑内容）；agent/storage/executor/console 为运行时上下文。示例："console.log(opts.args);"。',
+        description: 'addHook 时的钩子体源码。会被包成 (opts, agent, storage, executor, console) => void：可通过改写 opts.args 影响行为（如 streamChat.before 里改 opts.args[0].messages / .tools / .model / 温度等，即可在请求发出前编辑完整请求体 ChatRequestBody）；agent/storage/executor/console 为运行时上下文。示例："console.log(opts.args);"。',
       },
       hookId: { type: 'string', description: 'removeHook 时目标钩子 id（与 name 二选一）' },
     },
@@ -887,9 +894,9 @@ const orchestrateTool: ToolDef = {
       else msgs.unshift({ role: 'system', content: sp });
       return '已更新系统提示并热生效（当下会话即应用）';
     }
-    if (action === 'setEngine') {
+    if (action === 'setRequestBody') {
       const raw = String(args.baseRequestBody ?? '');
-      if (!raw) return 'setEngine 需提供 baseRequestBody（JSON 字符串）';
+      if (!raw) return 'setRequestBody 需提供 baseRequestBody（JSON 字符串）';
       let parsed: unknown;
       try {
         parsed = JSON.parse(raw);
@@ -899,7 +906,7 @@ const orchestrateTool: ToolDef = {
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
         return 'baseRequestBody 必须是 JSON 对象（如 {"temperature":0.7,"reasoning_effort":"medium"}）';
       }
-      const ok = await requestApproval({ name: 'orchestrate.setEngine', riskLevel: 'high', code: raw }, ctx.agent);
+      const ok = await requestApproval({ name: 'orchestrate.setRequestBody', riskLevel: 'high', code: raw }, ctx.agent);
       if (!ok) return '已取消';
       setBaseRequestBody(parsed as Record<string, unknown>); // 持久化，下次 streamChat 起即生效（动态，无需重载）
       const eff = getBaseRequestBody();
@@ -956,7 +963,7 @@ const orchestrateTool: ToolDef = {
       }
       return removed ? `已移除 ${removed} 个钩子（id=${id || '-'} name=${name || '-'}）` : `未找到匹配钩子（id=${id || '-'} name=${name || '-'}）`;
     }
-    return `未知 action: ${action}（支持 view/update/setEngine/addHook/removeHook）`;
+    return `未知 action: ${action}（支持 view/update/setRequestBody/addHook/removeHook）`;
   },
 };
 
@@ -1118,3 +1125,7 @@ export const defaultTools: ToolDef[] = [
   orchestrateTool,
   sessionTool,
 ];
+
+// 由宿主（agent.ts）注入的额外内置工具（UI 等）。executor 不 import ui 以保持核心解耦；
+// 此数组供 bootList / allToolStates / setEnabled 统一枚举内置工具（含非 defaultTools 的内置）。
+export const extraBuiltinTools: ToolDef[] = [];

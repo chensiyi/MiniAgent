@@ -1,9 +1,9 @@
-import { llm, type ChatMessage, type ToolCallLite } from './core/llm';
-import { executor, defaultTools, type ToolCall, type ToolDef } from './core/executor';
+import { llm, type ChatMessage, type ToolCallLite, type ChatRequestBody } from './core/llm';
+import { executor, defaultTools, extraBuiltinTools, type ToolCall, type ToolDef } from './core/executor';
 import { storage } from './core/storage';
 import { ui } from './ui/ui';
 import { withHooks } from './core/withHooks';
-import { getSystemPrompt, getConfig } from './model/config';
+import { getSystemPrompt, getConfig, getBaseRequestBody } from './model/config';
 
 // 队列引擎的"继续推理"哨兵：工具跑完后压回 messageQueue 队首，引擎取出后只调 LLM、不提交新用户消息。
 const SENTINEL = { _infer: true } as unknown as ChatMessage;
@@ -95,10 +95,23 @@ export const agent = {
           // 流式累积（文本逐字更新、工具调用按 index 合并）
           let content = '', reasoning = '';
           const acc: Record<number, { id: string; name: string; args: string }> = {};
-          for await (const chunk of llm.streamChat({
+          // 构建请求体：baseRequestBody 模板（编排可热更新）+ config.model 兜底；
+          // messages/stream/tools 经此请求体传入；before 钩子可编辑（streamChat.before 改 opts.args[0]）。
+          const tools = executor.list(); // 仅非 hidden 工具进 LLM 载荷
+          const body: ChatRequestBody = {
+            ...getBaseRequestBody(),
             messages: agent.messages,
-            tools: executor.list(), // 仅非 hidden 工具进 LLM 载荷
-          })) {
+            stream: true,
+          };
+          if (typeof body.model !== 'string' || !body.model) body.model = getConfig().model; // model 兜底 config
+          if (tools.length) {
+            body.tools = tools.map((t) => ({
+              type: 'function' as const,
+              function: { name: t.name, description: t.description, inputSchema: t.inputSchema },
+            }));
+            body.tool_choice = 'auto';
+          }
+          for await (const chunk of llm.streamChat(body)) {
             if (chunk.delta) {
               content += chunk.delta;
               agent.output.updateLast('assistant', content, reasoning);
@@ -247,13 +260,90 @@ function ensureExternalLibs(): void {
   void tryLoad('DOMPurify', SOURCES.DOMPurify);
 }
 
+// ---- UI 作为 tool（§11：核心可无 UI 运行；UI 是工具清单里一个可禁用/启用的 tool）----
+// register：挂载聊天界面 + 接管输出槽/渲染/确认闸；unregister：卸载 DOM + 还原 headless。
+// 关闭界面 = 在 ⚙ 工具清单禁用 ui 工具（经确认闸、可逆），核心照常 headless 运行；
+// 持久化走 config.disabledTools（init 已剔除黑名单）。重新启用 = register 重新挂载。
+function whenDomReady(): Promise<void> {
+  return new Promise((resolve) => {
+    if (document.readyState !== 'loading') return resolve();
+    document.addEventListener('DOMContentLoaded', () => resolve(), { once: true });
+  });
+}
+
+// 持久化的最小启动器：UI 被禁用后的"重新启用"入口（独立于已被卸载的 UI 本身，保证可逆、humane）。
+let launcherEl: HTMLElement | null = null;
+function ensureLauncher(): HTMLElement {
+  if (launcherEl) return launcherEl;
+  const css =
+    '#miniagent-launcher{position:fixed;right:14px;bottom:14px;z-index:2147483646}' +
+    '#miniagent-launcher button{padding:6px 12px;border:1px solid rgba(55,141,221,.6);border-radius:8px;' +
+    'background:rgba(55,141,221,.92);color:#fff;cursor:pointer;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,.3)}';
+  const style = document.createElement('style'); style.textContent = css;
+  (document.head ?? document.documentElement).append(style);
+  const el = document.createElement('div'); el.id = 'miniagent-launcher';
+  el.innerHTML = '<button type="button" title="启用 MiniAgent 界面">💬 启用界面</button>';
+  (el.querySelector('button') as HTMLButtonElement).onclick = () => { void executor.setEnabled('ui', true); };
+  if (document.body) document.body.append(el);
+  else document.addEventListener('DOMContentLoaded', () => document.body.append(el), { once: true });
+  launcherEl = el;
+  return el;
+}
+function showLauncher(): void { ensureLauncher().style.display = ''; }
+function hideLauncher(): void { ensureLauncher().style.display = 'none'; }
+function createLauncher(): void {
+  const el = ensureLauncher();
+  const uiUp = executor.list(true).some((t) => t.name === 'ui');
+  el.style.display = uiUp ? 'none' : '';
+}
+
+// 配置不完整时的提示文案
+const CONFIG_HINT = '⚠️ 未配置 API Key。请先设置：\n输入 /gm_storage /action set /ns default /key config /update true /value {"apiKey":"你的Key","baseURL":"https://openrouter.ai/api/v1","model":"openrouter/free"}';
+
+const uiTool: ToolDef = {
+  name: 'ui',
+  author: 'sys',
+  description: '界面工具：注册后挂载聊天界面并接管输出/渲染/确认闸；在工具清单禁用即"关闭界面"（经确认闸、可逆），核心仍 headless 运行。启用即重新挂载。',
+  inputSchema: {},
+  register: async (_ctx) => {
+    agent.output = ui.chat; // 输出槽接管（agent.output 默认 headless 空实现）
+    agent.extensions.set('ui', ui.chat); // 渲染型工具（如 marked）经此接管 UI 渲染
+    agent.extensions.set('approval', ui.requestApproval); // 确认闸经此接入（核心 requestApproval 委托）
+    await whenDomReady();
+    ui.chat.mount((text) => {
+      // 用户直接调用工具：/tool_name /param value
+      if (text.startsWith('/')) {
+        agent.output.append('user', text);
+        void handleToolCommand(text);
+        return;
+      }
+      // 配置检查：apiKey 未配置时提示用户通过工具命令设置
+      if (!getConfig().apiKey) {
+        agent.output.append('user', text);
+        agent.output.append('tool', CONFIG_HINT);
+        return;
+      }
+      void agent.sendMessage(text);
+    });
+    hideLauncher();
+  },
+  unregister: (_ctx) => {
+    ui.chat.unmount();
+    agent.output = headlessSink; // 还原 headless 空实现
+    agent.extensions.delete('ui');
+    agent.extensions.delete('approval');
+    showLauncher(); // 露出重新启用入口，保证可逆
+  },
+};
+
 function init(): void {
   storage.migrateFlatToNs('config', 'default', 'config');
   const cfg = getConfig(); // 先取 config（含工具黑名单 disabledTools）
   if (!storage.get('default', 'config')) storage.set('default', 'config', cfg);
   executor.attachAgent(agent);
   const disabled = new Set(cfg.disabledTools ?? []);
-  const bootList = defaultTools.filter((t) => !disabled.has(t.name)); // 黑名单直接移出名单（文档 §3/§5.2）
+  extraBuiltinTools.push(uiTool); // UI 以 tool 形态加入内置清单（register/unregister 接管挂载/卸载）
+  const bootList = [...defaultTools, ...extraBuiltinTools].filter((t) => !disabled.has(t.name)); // 黑名单直接移出名单（文档 §3/§5.2）
   executor.registerAll(bootList); // 拓扑序注册默认工具（已剔除黑名单）
   executor.rehydrateTools(); // 重建启用的自编排工具（拓扑序）
   executor.rehydrateHooks(agent); // 重建用户钩子（热插拔，刷新不丢）
@@ -322,37 +412,9 @@ async function handleToolCommand(text: string): Promise<void> {
   }
 }
 
-// 配置不完整时的提示文案
-const CONFIG_HINT = '⚠️ 未配置 API Key。请先设置：\n输入 /gm_storage /action set /ns default /key config /update true /value {"apiKey":"你的Key","baseURL":"https://openrouter.ai/api/v1","model":"openrouter/free"}';
-
-// 挂载 UI（UI 作为可插拔组件接入核心：设置输出槽 + 注册到通用能力表，供工具与核心发现）。
-// 核心逻辑（引擎 / sendMessage / handleToolCommand）只写 agent.output，绝不直连 ui 模块——
-// 此处是唯一的 UI 接入点（glue），核心因此可在无 UI 环境 headless 运行。
-function mount(): void {
-  agent.output = ui.chat; // UI 接管输出槽（agent.output 默认 headless 空实现）
-  agent.extensions.set('ui', ui.chat); // 渲染型工具（如 marked）经此接管 UI 渲染
-  agent.extensions.set('approval', ui.requestApproval); // 确认闸经此接入（核心 requestApproval 委托）
-  ui.chat.mount((text) => {
-    // 用户直接调用工具：/tool_name /param value
-    if (text.startsWith('/')) {
-      agent.output.append('user', text);
-      void handleToolCommand(text);
-      return;
-    }
-    // 配置检查：apiKey 未配置时提示用户通过工具命令设置
-    if (!getConfig().apiKey) {
-      agent.output.append('user', text);
-      agent.output.append('tool', CONFIG_HINT);
-      return;
-    }
-    void agent.sendMessage(text);
-  });
-}
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', mount);
-} else {
-  mount();
-}
+// UI 已作为 tool 由 agent.init() 注册（默认启用）：其 register 挂载界面、unregister 卸载并还原 headless。
+// 此处仅启动持久化的最小启动器（UI 被禁用后的"重新启用"入口，保证可逆、humane）。
+createLauncher();
 
 // 暴露全局单例（标准用户脚本空间：沙箱内 globalThis，便于运行时 / LLM 动态编辑）
 (globalThis as unknown as { agent: typeof agent }).agent = agent;

@@ -210,6 +210,13 @@ UI 不是核心的一部分，而是一个**可插拔组件**（概念上的 too
 | 渲染接管（marked 等） | `setMarkdownRenderer` 生效 | 工具 `register` 静默跳过（不崩） |
 | 确认闸 | UI 弹确认气泡 | 自动放行（自动化场景） |
 
-### 11.3 目标终点
+### 11.3 UI 作为 tool（已实现）：关闭界面 = 禁用 ui 工具，经确认闸、可逆
 
-UI 彻底成为 `tool_manager` 可实例化的 tool：以 `register`/`unregister` 钩子挂载 / 卸载 DOM（开启即挂载、关闭即卸载），核心完全 headless 可独立运行于 CLI / 服务场景。当前 UI 经 `mount()` 单一接入点挂载，已满足"核心不依赖 UI"的强约束；后续可把 `mount()` 改为经 `tool_manager register` 触发，使 UI 与其他 tool 同等地位。
+UI 已实现为内置 tool（`name: 'ui'`）：由 `agent.ts` 定义 `uiTool`（含 `register`/`unregister` 钩子）并经 `extraBuiltinTools` 注入枚举；`executor` 不 `import` UI，保持解耦。`uiTool` 不带 `call`，故不进 LLM 工具清单，但 `allToolStates` 会列出它（可在 ⚙ 面板开关）。
+
+- **注册即挂载**：`uiTool.register` 设 `agent.output = ui.chat`、向 `agent.extensions` 注册 `'ui'`/`'approval'`、挂载 DOM；`agent.init()` 启动期把 `uiTool` 加入 `bootList` 默认注册。
+- **关闭界面 = 禁用 ui 工具**：⚙ 清单取消勾选 → `executor.setEnabled('ui', false)` → 因 `name==='ui'` 且为禁用，**必经 `requestApproval` 确认闸**（UI 弹确认；headless 自动放行）。用户拒绝则什么都不做（面板 `onchange` 把复选框还原为实际状态），确认才 `unregister`：卸载 DOM + 还原 headless（`output` 回空实现、清空 `extensions` 的 `ui`/`approval`）。禁用状态写入 `config.disabledTools` 黑名单持久化，重载后 `init` 自动剔除、保持关闭。
+- **可逆、不永久销毁**：UI 卸载后核心照常 headless 运行。`agent.ts` 建了一个**持久化最小启动器** `#miniagent-launcher`（独立于已卸载的 UI，始终存在），点击即 `executor.setEnabled('ui', true)` 重新挂载（**无需确认、安全**）。这是"关闭后可重新启用"的 humane 入口。
+- **禁止 `agent.ui` 硬引用**：`ui` 已加入 `executor` 的 `RESERVED`，工具注册不会把 `ui` 挂成 `agent.ui` 属性；UI 能力只经 `agent.extensions` 发现。
+
+> 设计铁律：UI 是工具清单里一个**可逆**的 tool，关闭只是禁用它（有确认、可重开），**绝不**做"一次性 `root.remove()` 后无重开入口"的永久销毁式关闭——否则不人道。

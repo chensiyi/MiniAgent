@@ -84,7 +84,13 @@ function renderToolsPanel(panel: HTMLElement): void {
     desc.textContent = s.description ?? '';
     desc.title = s.description ?? ''; // 鼠标悬停看全文
     const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = s.enabled;
-    cb.onchange = () => executor.setEnabled(s.name, cb.checked);
+    cb.onchange = async () => {
+      const next = cb.checked;
+      await executor.setEnabled(s.name, next);
+      // 禁用被用户拒绝时 setEnabled 未生效（如关闭界面），复选框还原为实际启用态
+      const live = executor.list(true).some((t) => t.name === s.name);
+      if (cb.checked !== live) cb.checked = live;
+    };
     row.append(name, desc, cb); panel.append(row);
   }
 }
@@ -218,6 +224,22 @@ export const ui = {
         }
         if (e.key === 'Enter') { e.preventDefault(); doSend(); }
       };
+    },
+
+    // 卸载：移除 DOM 并清空节点引用（供 ui 工具 unregister 调用；重挂载由 mount 重新初始化，幂等）。
+    unmount(): void {
+      if (root && root.parentNode) root.parentNode.removeChild(root);
+      root = null as unknown as HTMLElement;
+      bubbles = null as unknown as HTMLElement;
+      input = null as unknown as HTMLInputElement;
+      sendBtn = null as unknown as HTMLButtonElement;
+      stopBtn = null as unknown as HTMLButtonElement;
+      lastAssistantEl = null;
+      lastToolEl = null;
+      acEl = null;
+      onSendRef = null;
+      toolsPanelEl = null;
+      toggleBtnEl = null;
     },
 
     append(role: string, text: string): void {
