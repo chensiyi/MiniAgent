@@ -1,6 +1,6 @@
 {
   "name": "miniagent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "MiniAgent —— 极简 userScript 智能体（原生 DOM + GM_xmlhttpRequest 桥接 LLM，无框架）",
