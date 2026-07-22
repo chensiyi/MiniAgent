@@ -1,7 +1,6 @@
 import gmFetch from '@sec-ant/gm-fetch';
-import { getConfig } from '../model/config';
-import { withHooks } from './withHooks';
 
+// ============ 类型（保持与 agent.engine 契约一致） ============
 export type ChatRole = 'user' | 'assistant' | 'system' | 'tool';
 
 export interface ChatMessage {
@@ -36,8 +35,8 @@ export interface ApiTool {
   function: { name: string; description: string; inputSchema: Record<string, unknown> };
 }
 
-// 请求体：调用方构建并传入 streamChat。含 messages / stream / tools，以及模型参数（model / temperature /
-// max_tokens / reasoning_effort 及厂商扩展字段 top_p / response_format …）。编排钩子（streamChat.before）
+// 请求体：调用方（agent.engine）依据 config 构建并传入 chat。含 messages / stream / tools，以及模型参数（model /
+// temperature / max_tokens / reasoning_effort 及厂商扩展字段 top_p / response_format …）。编排钩子（chat.before）
 // 通过 opts.args[0] 拿到这份请求体并可直接编辑（改 messages / tools / model / 温度等）。
 export interface ChatRequestBody {
   messages: ChatMessage[];
@@ -58,9 +57,75 @@ export interface ChatResult {
   model?: string;
 }
 
-const decoder = new TextDecoder();
+// llm 运行依赖（由 agent 在调用时传入，llm 不反向依赖 agent）
+export interface LlmDeps {
+  apiKey: string;
+  baseURL?: string;
+}
 
-// llmObj：对外统一入口。streamChat 为 async generator（withHooks 包成 asyncGenerator，仅 before 钩子）；chat 收集为完整结果。
+// ============ 最小 SSE 解析（吸收 openai SDK streaming.mjs 思路，零依赖） ============
+// 关键点：① 用 TextDecoder({stream:true}) 增量解码，跨 chunk 的 UTF-8 多字节不会截断；
+//         ② 按 \n 切行并保留末尾半行；③ SSEParser 跨行累积 event/data，遇空行聚合出一个事件。
+
+class SSEParser {
+  private event: string | null = null;
+  private data: string[] = [];
+  // 返回 null 表示尚未聚合完整事件；返回 {event,data} 表示该事件已就绪
+  push(line: string): { event: string | null; data: string } | null {
+    if (line.endsWith('\r')) line = line.slice(0, -1);
+    if (line === '') {
+      if (!this.event && this.data.length === 0) return null;
+      const sse = { event: this.event, data: this.data.join('\n') };
+      this.event = null;
+      this.data = [];
+      return sse;
+    }
+    if (line.startsWith(':')) return null; // SSE 注释行，忽略
+    const idx = line.indexOf(':');
+    if (idx === -1) return null;
+    const field = line.slice(0, idx);
+    let value = line.slice(idx + 1);
+    if (value.startsWith(' ')) value = value.slice(1);
+    if (field === 'event') this.event = value;
+    else if (field === 'data') this.data.push(value);
+    return null;
+  }
+}
+
+// 从响应体流逐个产出 SSE 事件（已切行 + 聚合；不含 [DONE]/JSON 解析，交给消费方）
+async function* sseMessages(body: ReadableStream<Uint8Array>): AsyncGenerator<{ event: string | null; data: string }> {
+  const td = new TextDecoder();
+  let buf = '';
+  const reader = body.getReader();
+  const parser = new SSEParser();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += td.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        const ev = parser.push(line);
+        if (ev) yield ev;
+      }
+    }
+    buf += td.decode(); // flush 残留半行
+    if (buf) {
+      const ev = parser.push(buf);
+      if (ev) yield ev;
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      /* 已结束 */
+    }
+  }
+}
+
+// ============ llm 对象（chat 为流式唯一入口；由 hooks 工具在注册时经 wrapHook 包裹） ============
 export const llm = {
   _abort: null as AbortController | null,
 
@@ -70,42 +135,46 @@ export const llm = {
     this._abort = null;
   },
 
-  // 核心：流式调用 /chat/completions。逐行解析 SSE，yield 文本/思考/工具增量；结束 return 完整 ChatResult。
-  // 入参 body 为已构建的请求体（messages/stream/tools + 模型参数），由调用方组装（含 baseRequestBody 模板
-  // 与 config.model 兜底）。before 钩子可在请求发出前编辑 body（messages/tools/model/温度等）。
-  streamChat: withHooks(async function* (body: ChatRequestBody): AsyncGenerator<ChatChunk> {
-    const { apiKey, baseURL } = getConfig();
-    if (!apiKey) throw new Error('未配置 API Key：请输入 /gm_storage /action set /ns default /key config /update true /value {"apiKey":"你的Key","baseURL":"https://openrouter.ai/api/v1","model":"openrouter/free"}');
-
-    const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
-    // body 已由调用方构建（含 messages/stream/tools + baseRequestBody + config.model 兜底）。
-    // 此处仅做必要兜底与锁定：messages 保底空数组、stream 强制 true（SSE 解析要求）。
-    body.messages = body.messages ?? [];
-    body.stream = true;
+  // 核心：流式调用 /chat/completions。零依赖自实现 SSE（基于 openai SDK 的解析思路），逐 yield 文本/思考/工具增量；
+  // 结束 return 完整 ChatResult。入参 body 为已构建的请求体（agent.engine 组装，系统提示预置为 messages[0]）；
+  // deps 由 agent 传入（apiKey/baseURL），llm 不反向依赖 agent。
+  chat: async function* (body: ChatRequestBody, deps: LlmDeps): AsyncGenerator<ChatChunk> {
+    if (!deps.apiKey) {
+      throw new Error(
+        '未配置 API Key：请输入 /gm_storage /action set /key config /update true /value {"apiKey":"你的Key","baseURL":"https://openrouter.ai/api/v1","model":"openrouter/free"}',
+      );
+    }
 
     // 内部 AbortController：支持 llm.cancel()
     llm._abort = new AbortController();
     const signal = llm._abort.signal;
 
-    const res = await gmFetch(url, {
+    const base = (deps.baseURL ?? 'https://api.openai.com/v1').replace(/\/+$/, '');
+    const url = `${base}/chat/completions`;
+    // 锁定 stream:true；默认请求 usage（部分厂商需 stream_options 才回传 usage）
+    const params = {
+      ...body,
+      stream: true,
+      stream_options: (body as Record<string, unknown>).stream_options ?? { include_usage: true },
+    };
+
+    const resp: any = await gmFetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${deps.apiKey}`,
+        Accept: 'text/event-stream',
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(params),
       signal,
     });
-
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`LLM 请求失败 (${res.status}): ${text.slice(0, 200)}`);
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '');
+      throw new Error(`LLM 请求失败 ${resp.status}: ${String(text).slice(0, 300)}`);
     }
+    if (!resp.body) throw new Error('LLM 响应无 body 流');
 
-    const reader = res.body?.getReader();
-    if (!reader) throw new Error('响应不可流式读取（gm-fetch 未返回 ReadableStream）');
-
-    let buf = '';
+    // 聚合状态
     let content = '';
     let reasoningContent = '';
     let finishReason: string | null = null;
@@ -113,30 +182,22 @@ export const llm = {
     let modelResp: string | undefined = undefined;
     const acc: Record<number, { id: string; name: string; args: string }> = {};
 
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-
-      const lines = buf.split('\n');
-      buf = lines.pop() ?? '';
-      for (const line of lines) {
-        const s = line.trim();
-        if (!s.startsWith('data:')) continue;
-        const data = s.slice(5).trim();
-        if (data === '[DONE]') {
-          yield { done: true };
-          continue;
-        }
-        let json: any;
+    try {
+      for await (const ev of sseMessages(resp.body as ReadableStream<Uint8Array>)) {
+        if (ev.data === '[DONE]') break;
+        let data: any;
         try {
-          json = JSON.parse(data);
+          data = JSON.parse(ev.data);
         } catch {
+          console.error('[MiniAgent.LLM] 无法解析 SSE data:', ev.data);
           continue;
         }
-        if (json.model) modelResp = json.model;
-        if (json.usage) usage = json.usage;
-        const choice = json.choices?.[0];
+        if (data && data.error) {
+          throw new Error(`LLM 错误: ${data.error.message ?? JSON.stringify(data.error)}`);
+        }
+        if (data.model) modelResp = data.model;
+        if (data.usage) usage = data.usage;
+        const choice = data.choices?.[0];
         const delta = choice?.delta;
         if (!delta) continue;
         if (delta.content) {
@@ -150,9 +211,9 @@ export const llm = {
           yield { reasoning };
         }
         if (delta.tool_calls) {
-          for (const tc of delta.tool_calls as any[]) {
+          for (const tc of delta.tool_calls) {
             // 缺失 index 时分配到下一空槽（而非强并到 0），避免多个工具调用被错误合并
-            let i = tc.index;
+            let i = tc.index as number | undefined;
             if (i == null) i = Object.keys(acc).length;
             acc[i] ??= { id: '', name: '', args: '' };
             if (tc.id) acc[i].id = tc.id;
@@ -170,27 +231,87 @@ export const llm = {
         }
         if (choice?.finish_reason) finishReason = choice.finish_reason;
       }
+    } catch (e) {
+      // 取消：静默退出，返回已聚合的部分结果（与 SDK 行为一致）
+      if (e instanceof Error && e.name === 'AbortError') {
+        return buildResult(content, reasoningContent, acc, finishReason, usage, modelResp);
+      }
+      throw e;
     }
 
-    const toolCalls: ToolCallLite[] = Object.values(acc).map((t) => ({
-      id: t.id,
-      type: 'function',
-      function: { name: t.name, arguments: t.args },
-    }));
-
-    // 完整结果由 return 提供（for await 会丢弃，chat() 用手动迭代器捕获）
-    return { content, reasoningContent, toolCalls, finishReason, usage, model: modelResp } as ChatResult;
-  }),
-
-  // 收集完整结果：手动驱动迭代器以捕获 return 的完整 ChatResult（含 reasoningContent/finishReason/usage/model）
-  chat: withHooks(async (body: ChatRequestBody): Promise<ChatResult> => {
-    const it = llm.streamChat(body);
-    let r = await it.next();
-    while (!r.done) r = await it.next();
-    return (r.value ?? { content: '', toolCalls: [] }) as ChatResult;
-  }),
+    return buildResult(content, reasoningContent, acc, finishReason, usage, modelResp);
+  },
 };
 
-// 迟绑 thisArg：使 streamChat / chat 体内 this 指向 llm（局部上下文），避免在其自身初始化器里引用自身导致 TDZ。
-(llm.streamChat as unknown as { __thisArg?: unknown }).__thisArg = llm;
-(llm.chat as unknown as { __thisArg?: unknown }).__thisArg = llm;
+// 把聚合状态收成 ChatResult（消除引擎内累加器与 return 值双重累积的漂移）
+function buildResult(
+  content: string,
+  reasoningContent: string,
+  acc: Record<number, { id: string; name: string; args: string }>,
+  finishReason: string | null,
+  usage: any,
+  modelResp: string | undefined,
+): ChatResult {
+  const toolCalls: ToolCallLite[] = Object.values(acc).map((t) => ({
+    id: t.id,
+    type: 'function',
+    function: { name: t.name, arguments: t.args },
+  }));
+  return { content, reasoningContent, toolCalls, finishReason, usage, model: modelResp };
+}
+
+// ============ ReAct 循环封装：把"chat → 执行工具 → 再 chat"收进 llm，引擎只做侵入式改造 ============
+// 调用方只需提供：历史 messages、可用 tools、executeTool（执行工具并返回 tool 结果消息）、onChunk（流式 UI 钩子）。
+// 内部循环：调 chat 流式 → 无 tool_calls 即结束 return；有则 executeTool → 把结果追加入 messages → 再 chat，直到 maxSteps。
+export async function* runReAct(opts: {
+  messages: ChatMessage[]; // 历史（会被原地追加 assistant / tool 消息）
+  tools: ApiTool[];
+  systemPrompt?: string;
+  model: string;
+  deps: LlmDeps;
+  maxSteps?: number;
+  onChunk?: (c: ChatChunk) => void; // 流式增量钩子（UI 更新等侵入逻辑）
+  executeTool: (calls: ToolCallLite[]) => Promise<ChatMessage[]>; // 工具执行器：返回 tool 结果消息
+}): AsyncGenerator<ChatChunk, ChatResult> {
+  const max = opts.maxSteps ?? 8;
+  for (let step = 0; step < max; step++) {
+    const body: ChatRequestBody = {
+      model: opts.model,
+      messages: [
+        ...(opts.systemPrompt ? [{ role: 'system' as const, content: opts.systemPrompt }] : []),
+        ...opts.messages,
+      ],
+      stream: true,
+      ...(opts.tools.length ? { tools: opts.tools, tool_choice: 'auto' } : {}),
+    };
+    const result = await driveChat(body, opts.deps, opts.onChunk);
+    // 写回 assistant 消息（含 tool_calls，供下一轮工具循环保留上下文）
+    opts.messages.push({
+      role: 'assistant',
+      content: result.content,
+      reasoning_content: result.reasoningContent || undefined,
+      tool_calls: result.toolCalls.length ? result.toolCalls : undefined,
+    });
+    opts.onChunk?.({ done: true });
+    if (!result.toolCalls.length) return result;
+    const toolMsgs = await opts.executeTool(result.toolCalls);
+    for (const m of toolMsgs) opts.messages.push(m);
+  }
+  // 超过 maxSteps 保护：返回空结果，由调用方决定后续（通常不应发生）
+  return { content: '', toolCalls: [], reasoningContent: undefined, finishReason: 'max_steps', usage: undefined, model: undefined };
+}
+
+// 手动驱动 chat 生成器，转发分片给 onChunk，并捕获 return 的 ChatResult（for await 会丢弃 return）
+async function driveChat(
+  body: ChatRequestBody,
+  deps: LlmDeps,
+  onChunk?: (c: ChatChunk) => void,
+): Promise<ChatResult> {
+  const it = llm.chat(body, deps);
+  let r = await it.next();
+  while (!r.done) {
+    onChunk?.(r.value as ChatChunk);
+    r = await it.next();
+  }
+  return (r.value ?? { content: '', toolCalls: [] }) as ChatResult;
+}

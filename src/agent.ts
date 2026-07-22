@@ -1,16 +1,10 @@
-import { llm, type ChatMessage, type ToolCallLite, type ChatRequestBody, type ChatResult, type ChatChunk } from './core/llm';
+import { llm, runReAct, type ChatMessage, type ToolCallLite, type ChatResult } from './core/llm';
 import { executor, defaultTools, extraBuiltinTools, type ToolCall, type ToolDef, b64Decode } from './core/executor';
 import { storage } from './core/storage';
 import { LEGACY } from './core/storage';
 import { ui } from './ui/ui';
 import { DEFAULT_CONFIG, SYSTEM_PROMPT, normalizeConfig, type AppConfig } from './model/config';
 import { rehydrateHooks } from './tools/hooks';
-
-// 队列引擎的"继续推理"哨兵：工具跑完后压回 messageQueue 队首，引擎取出后只调 LLM、不提交新用户消息。
-const SENTINEL = { _infer: true } as unknown as ChatMessage;
-function isSentinel(m: ChatMessage): boolean {
-  return (m as unknown as { _infer?: boolean })._infer === true;
-}
 
 // 把流式累积的 ToolCallLite 转成 executor 的 ToolCall（参数 JSON.parse）
 function toToolCall(t: ToolCallLite): ToolCall {
@@ -59,109 +53,70 @@ export const agent = {
     llm.cancel();
   },
 
-  // 引擎：队列调度循环（由 hooks 工具在注册时经 wrapHook 包裹，before 钩子管运行态）
+  // 引擎：消息队列驱动（由 hooks 工具在注册时经 wrapHook 包裹，before 钩子管运行态）。
+  // ReAct 循环已收口到 llm.runReAct：agent 只在 onChunk 做流式 UI、在 executeTool 做工具执行（侵入式改造），
+  // 不再手写 SSE 解析与"chat→工具→再chat"循环。
   engine: async function () {
     try {
-      while (agent.messageQueue.length || agent.toolCallQueue.length) {
-        // ① 工具队列优先
-        if (agent.toolCallQueue.length) {
-          const calls = agent.toolCallQueue.splice(0);
-          for (const call of calls) {
-            // 进度指示：执行前先亮"执行中"，避免聊天区在耗时/确认工具期间空白
-            agent.output.append('tool', `⚙ ${call.name}: 执行中…`);
-            const obs = await executor.run(call, agent);
-            agent.messages.push({
-              role: 'tool',
-              content: obs,
-              tool_call_id: call.id,
-              name: call.name,
-            } as ChatMessage);
-            agent.output.updateLast('tool', `⚙ ${call.name}: ${obs}`);
-          }
-          // 工具跑完 → 压"继续推理"哨兵到队首
-          agent.messageQueue.unshift(SENTINEL);
-          continue;
-        }
+      while (agent.messageQueue.length) {
+        // 推进一条消息：入历史，弹出队首（user 气泡已由 sendMessage 渲染，不重复 append）
+        const msg = agent.messageQueue[0];
+        agent.messages.push(msg);
+        agent.messageQueue.shift();
 
-        // ② 推进消息 / 再推理（peek 不弹，保证在途期间队列非空=活动中）
-        if (agent.messageQueue.length) {
-          const msg = agent.messageQueue[0];
-          const inf = isSentinel(msg);
-          if (!inf) {
-            agent.messages.push(msg); // user 气泡已由 sendMessage 渲染，这里不重复 append
-          }
+        // 可用工具（仅非 hidden 工具进 LLM 载荷）；映射为 API 的 ApiTool 形态
+        const tools = executor.list().map((t) => ({
+          type: 'function' as const,
+          function: { name: t.name, description: t.description, inputSchema: t.inputSchema },
+        }));
+        const cfg = agent.config;
 
-          // assistant 占位气泡：流式逐字更新依赖 lastAssistantEl，必须先建
-          agent.output.append('assistant', '');
+        // assistant 占位气泡：流式逐字更新依赖 lastAssistantEl，必须先建
+        agent.output.append('assistant', '');
+        let lastContent = '', lastReasoning = '';
 
-          // 构建请求体：model 直接来自 config；系统提示作为 messages[0] 在构建时注入（单一真相源=config，无需钩子）。
-          // 其它请求参数（temperature/max_tokens/reasoning_effort/厂商扩展）不单独持久化，需要时用 chat.before 钩子注入（opts.args[0]）。
-          // before 钩子可在请求发出前编辑整个 body（chat.before 改 opts.args[0].messages/.tools/.model/温度等）。
-          const tools = executor.list(); // 仅非 hidden 工具进 LLM 载荷
-          const cfg = agent.config;
-          const body: ChatRequestBody = {
-            model: cfg.model,
-            messages: [
-              { role: 'system', content: cfg.systemPrompt ?? '' }, // 系统提示：构建请求时注入，非经钩子
-              ...agent.messages,
-            ],
-            stream: true,
-          };
-          if (tools.length) {
-            body.tools = tools.map((t) => ({
-              type: 'function' as const,
-              function: { name: t.name, description: t.description, inputSchema: t.inputSchema },
-            }));
-            body.tool_choice = 'auto';
-          }
-
-          // 手动驱动迭代器：逐块更新 UI，结束(done)时 r.value 即 chat 的 return（完整 ChatResult）。
-          // 以 return 的 toolCalls 为权威真相源，消除与引擎内累加器双重累积的漂移风险。
-          const it = llm.chat(body);
-          let r = await it.next();
-          let content = '', reasoning = '';
-          while (!r.done) {
-            const chunk = r.value as ChatChunk;
-            if (chunk.delta) {
-              content += chunk.delta;
-              agent.output.updateLast('assistant', content, reasoning);
+        // runReAct 收口"chat → 执行工具 → 再 chat"循环；agent 仅在 onChunk 做 UI、在 executeTool 做工具执行。
+        const it = runReAct({
+          messages: agent.messages,
+          tools,
+          systemPrompt: cfg.systemPrompt ?? '',
+          model: cfg.model,
+          deps: { apiKey: cfg.apiKey, baseURL: cfg.baseURL },
+          onChunk: (c) => {
+            if (c.delta) { lastContent += c.delta; agent.output.updateLast('assistant', lastContent, lastReasoning); }
+            if (c.reasoning) { lastReasoning += c.reasoning; agent.output.updateLast('assistant', lastContent, lastReasoning); }
+          },
+          executeTool: async (calls) => {
+            const msgs: ChatMessage[] = [];
+            for (const call of calls) {
+              const tc = toToolCall(call);
+              agent.output.append('tool', `⚙ ${tc.name}: 执行中…`);
+              const obs = await executor.run(tc, agent);
+              msgs.push({ role: 'tool', content: obs, tool_call_id: tc.id, name: tc.name } as ChatMessage);
+              agent.output.updateLast('tool', `⚙ ${tc.name}: ${obs}`);
             }
-            if (chunk.reasoning) {
-              reasoning += chunk.reasoning;
-              agent.output.updateLast('assistant', content, reasoning);
-            }
-            r = await it.next();
-          }
-          const final = (r.value ?? { content: '', toolCalls: [] }) as ChatResult;
-          const toolCalls: ToolCallLite[] = final.toolCalls;
-          agent.output.finalizeLast('assistant', content, reasoning || undefined);
+            return msgs;
+          },
+        });
+        // 手动驱动：分片已在 onChunk 处理，这里只捕获 return 的 ChatResult
+        let r = await it.next();
+        while (!r.done) r = await it.next();
+        const final = (r.value ?? { content: '', toolCalls: [] }) as ChatResult;
 
-          // 日志：LLM 返回摘要（与 llm.ts 的"完成"日志呼应，便于交叉对照）
-          console.log('[MiniAgent.Agent] 📬 LLM 返回', {
-            contentLen: content.length,
-            reasoningLen: reasoning.length,
-            toolCalls: toolCalls.length,
-            toolCallNames: toolCalls.map((t) => t.function.name),
-          });
+        agent.output.finalizeLast('assistant', lastContent, lastReasoning || undefined);
 
-          agent.messages.push({
-            role: 'assistant',
-            content,
-            reasoning_content: reasoning || undefined, // 写回思考链，供后续轮次（含工具循环）保留上下文
-            tool_calls: toolCalls.length ? toolCalls : undefined,
-          } as ChatMessage);
-
-          agent.messageQueue.shift(); // 推理完成才弹出
-          if (toolCalls.length) {
-            console.log('[MiniAgent.Agent] 🔧 推入工具队列', toolCalls.map((t) => ({ name: t.function.name, args: t.function.arguments })));
-            agent.toolCallQueue.push(...toolCalls.map(toToolCall));
-          } else {
-            console.log('[MiniAgent.Agent] ℹ️ 本轮无工具调用');
-          }
-          continue;
+        // 日志：LLM 返回摘要（与 llm.ts 的"完成"日志呼应，便于交叉对照）
+        console.log('[MiniAgent.Agent] 📬 LLM 返回', {
+          contentLen: lastContent.length,
+          reasoningLen: lastReasoning.length,
+          toolCalls: final.toolCalls.length,
+          toolCallNames: final.toolCalls.map((t) => t.function.name),
+        });
+        if (final.toolCalls.length) {
+          console.log('[MiniAgent.Agent] 🔧 工具调用', final.toolCalls.map((t) => ({ name: t.function.name, args: t.function.arguments })));
+        } else {
+          console.log('[MiniAgent.Agent] ℹ️ 本轮无工具调用');
         }
-
-        break; // 两队列空 → idle
       }
     } finally {
       // 覆盖成功/异常/取消：复位运行态
