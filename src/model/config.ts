@@ -1,20 +1,17 @@
-import { storage } from '../core/storage';
-import { NS_FLAT, FLAT, LEGACY } from '../core/keys';
-
-// 单一配置原型：基础必要变量（主题风格 + api 标准），一块 blob 存、一次读出反序列化。
-// 系统提示 systemPrompt 并入本对象，统一存于扁平键 config（无 ns 前缀，用户在 Tampermonkey 数值里可直接编辑）。
+// 纯配置模型（不含任何 storage 逻辑）。运行期配置以 agent.config 形式常驻内存，
+// 持久化由业务代码显式负责：storage.set('config', agent.config)。
+// 系统提示 systemPrompt 并入本对象，存于扁平键 config（无 ns 前缀，用户可在 Tampermonkey 数值里直接编辑）。
 export interface AppConfig {
-  theme: 'light' | 'dark';
   apiKey: string;
   model: string;
   baseURL: string;
-  systemPrompt?: string; // 系统提示单一真相源：存于扁平 config 键（orchestrate.update 经 saveConfig 写入；init 用源码种子值初始化）。运行期只认此值，不回退源码常量
+  systemPrompt?: string; // 系统提示单一真相源：存于扁平 config 键（orchestrate.update 经 storage.set 写入；init 用源码种子值初始化）。运行期只认此值，不回退源码常量
   disabledTools?: string[]; // 工具黑名单：boot 时直接从注册名单剔除（文档 §3/§5.2）
 }
 
 export const DEFAULT_CONFIG: AppConfig = {
-  theme: 'light',
-  apiKey: '', // 由用户运行时在配置/UI 中填写，勿硬编码进源码（Push Protection 会拦截）
+  // theme: 'light',
+  apiKey: '', // 如果没有，会报错提示如何填写，勿硬编码进源码（Push Protection 会拦截）
   model: 'openrouter/free',
   baseURL: 'https://openrouter.ai/api/v1',
 };
@@ -32,14 +29,7 @@ export function riskAtLeast(level: RiskLevel | undefined, threshold: RiskLevel):
   return RISK_ORDER[level] >= RISK_ORDER[threshold];
 }
 
-// TODO（上下文 / 权限管理）：当前仅占位，不进运行时。
-// 未来规划：withHooks 的 before 钩子注入共享 ctx（上下文），并在敏感操作前做权限鉴权；
-// 权限系统就位后，ui.requestApproval 可由权限 hook 自动允许（白名单）/ 拦截，而不总是弹窗。
-// 另：可为工具加 danger 标记，让确认闸覆盖更多危险工具（非仅 code_run）。
-
-// 系统提示：告诉 LLM 它的身份、能力边界与基本规则（工具清单本身由函数定义下发，此处不重复罗列以免冗长）。
-// 注意：本常量仅供 init() 首次运行写入 config 作种子值；运行期系统提示的唯一真相源是扁平 config 键的 systemPrompt，
-// getSystemPrompt() / orchestrate 等一律只读 config，绝不回退本源码常量（避免"源码 + config"双源定义分歧）。
+// 系统提示种子（仅供 init 首次运行写入 agent.config 用；运行期只读 agent.config，绝不回退本常量）。
 export const SYSTEM_PROMPT = `你是运行在浏览器页面上的轻量 AI 智能体（MiniAgent）。工具是你唯一的能力面，按统一契约声明；只有带 call 的工具才会被直接调用，工具清单与入参见下方函数定义。
 
 规则：
@@ -49,47 +39,12 @@ export const SYSTEM_PROMPT = `你是运行在浏览器页面上的轻量 AI 智�
 - 可用 orchestrate 查看 / 热更新运行期编排（钩子、系统提示），用 session 管理对话落盘与多会话切换。
 - 回答简明，必要时一句话说明在做什么。`;
 
-// 系统提示单一真相源 = 扁平 config 键的 systemPrompt（orchestrate.update 经 saveConfig 写入）。
-// 运行期只认 config，绝不回退源码常量：首次运行由 init() 用源码种子值 SYSTEM_PROMPT 写进 config，
-// 之后读取只走 config，解决"源码 + config"双源定义分歧。
-export function getSystemPrompt(): string {
-  return getConfig().systemPrompt ?? '';
+// 纯函数：从一份配置取系统提示（运行期用 agent.config）。
+export function getSystemPrompt(cfg: AppConfig): string {
+  return cfg.systemPrompt ?? '';
 }
 
-// 配置落盘到扁平键 config（realKey 空 ns → 无前缀；回退到最初无 ns 设计，用户在 Tampermonkey 数值里可直接编辑）。
-// 惰性迁移：旧 default:config 若存在则自动迁回扁平 config 并删除旧的，兼容历史数据。
-export function getConfig(): AppConfig {
-  const flat = storage.get<Partial<AppConfig>>(NS_FLAT, FLAT.CONFIG);
-  if (flat) return { ...DEFAULT_CONFIG, ...flat };
-  const legacy = storage.get<Partial<AppConfig>>(LEGACY.CONFIG.ns, LEGACY.CONFIG.key);
-  if (legacy) {
-    storage.set(NS_FLAT, FLAT.CONFIG, legacy);
-    storage.del(LEGACY.CONFIG.ns, LEGACY.CONFIG.key);
-    return { ...DEFAULT_CONFIG, ...legacy };
-  }
-  return DEFAULT_CONFIG;
-}
-
-export function saveConfig(patch: Partial<AppConfig>): void {
-  storage.set(NS_FLAT, FLAT.CONFIG, { ...getConfig(), ...patch });
-}
-
-// 引擎动态请求体：合并进每次 streamChat 请求（编排可经 orchestrate.setRequestBody 热更新，无需重载）。
-// 与扁平 config（端点 / 鉴权：model/baseURL/apiKey）分离——config 管"连哪个"，baseRequestBody 管"怎么问"
-// （temperature / max_tokens / reasoning_effort 及厂商扩展字段，甚至可覆盖 model）。编排因此能"知道并编辑"引擎行为。
-// 扁平键 baseRequestBody（与 config 同策略：无 ns 前缀，用户在 Tampermonkey 数值里可直接编辑）。
-const DEFAULT_BASE_REQUEST_BODY: Record<string, unknown> = {};
-export function getBaseRequestBody(): Record<string, unknown> {
-  const flat = storage.get<Record<string, unknown>>(NS_FLAT, FLAT.BASE_REQUEST_BODY);
-  if (flat) return flat;
-  const legacy = storage.get<Record<string, unknown>>(LEGACY.BASE_REQUEST_BODY.ns, LEGACY.BASE_REQUEST_BODY.key); // 惰性迁移旧 default:baseRequestBody
-  if (legacy) {
-    storage.set(NS_FLAT, FLAT.BASE_REQUEST_BODY, legacy);
-    storage.del(LEGACY.BASE_REQUEST_BODY.ns, LEGACY.BASE_REQUEST_BODY.key);
-    return legacy;
-  }
-  return DEFAULT_BASE_REQUEST_BODY;
-}
-export function setBaseRequestBody(body: Record<string, unknown>): void {
-  storage.set(NS_FLAT, FLAT.BASE_REQUEST_BODY, body);
+// 反序列化辅助（storage-agnostic）：合并默认值，缺失字段回落 DEFAULT_CONFIG。
+export function normalizeConfig(raw: Partial<AppConfig> | null | undefined): AppConfig {
+  return { ...DEFAULT_CONFIG, ...(raw ?? {}) };
 }

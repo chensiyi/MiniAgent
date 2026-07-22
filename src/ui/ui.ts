@@ -1,5 +1,4 @@
 import { GM_addStyle } from '$';
-import { withHooks } from '../core/withHooks';
 import { executor } from '../core/executor';
 import { renderMarkdown } from '../tools/marked';
 
@@ -284,7 +283,15 @@ export const ui = {
     finalizeLast(role: string, text: string, reasoning?: string): void {
       const el = role === 'assistant' ? lastAssistantEl : null;
       if (!el) return;
-      const c = el.querySelector('.ma-md-content') as HTMLElement; if (c) setHTML(c, renderMarkdown(text));
+      const c = el.querySelector('.ma-md-content') as HTMLElement;
+      if (c) {
+        // 正文为空但有过思考（如工具调用轮次助手仅发 tool_calls）：给占位提示，避免主区空白
+        if (!text || !text.trim()) {
+          c.textContent = reasoning ? '(模型已思考，本轮未返回正文)' : '(空响应)';
+        } else {
+          setHTML(c, renderMarkdown(text));
+        }
+      }
       const think = el.querySelector('.ma-think') as HTMLElement;
       if (think) { if (reasoning) { const tb = el.querySelector('.ma-think-body') as HTMLElement; if (tb) setHTML(tb, renderMarkdown(reasoning)); } else think.remove(); }
     },
@@ -342,8 +349,8 @@ export const ui = {
     refresh(): void { if (toolsPanelEl && toolsPanelEl.style.display !== 'none') renderToolsPanel(toolsPanelEl); },
   },
 
-  // 人工确认闸（withHooks 异步闸门）：base 弹原生确认气泡，true=允许
-  requestApproval: withHooks(async (call: { name: string; code?: string; riskLevel?: string }): Promise<boolean> =>
+  // 人工确认闸（异步闸门，由 hooks 工具在注册时经 wrapHook 包裹）：base 弹原生确认气泡，true=允许
+  requestApproval: async (call: { name: string; code?: string; riskLevel?: string }): Promise<boolean> =>
     new Promise<boolean>((resolve) => {
       const el = document.createElement('div'); el.className = 'ma-bubble tool';
       const risk = call.riskLevel ? ` <span class="ma-risk">[${call.riskLevel}]</span>` : '';
@@ -356,8 +363,7 @@ export const ui = {
       (el.querySelector('.ok') as HTMLButtonElement).onclick = () => finish(true);
       (el.querySelector('.no') as HTMLButtonElement).onclick = () => finish(false);
       bubbles.append(el); bubbles.scrollTop = bubbles.scrollHeight;
-    })),
+    }),
 };
 
-// 迟绑 thisArg：requestApproval 体内 this 指向 ui（局部上下文），避免 TDZ。
-(ui.requestApproval as unknown as { __thisArg?: unknown }).__thisArg = ui;
+// 迟绑 thisArg（requestApproval 体内 this 指向 ui）已移至 hooks 工具的 register 统一处理（如需要）。

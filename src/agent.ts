@@ -1,10 +1,10 @@
 import { llm, type ChatMessage, type ToolCallLite, type ChatRequestBody, type ChatResult, type ChatChunk } from './core/llm';
-import { executor, defaultTools, extraBuiltinTools, type ToolCall, type ToolDef } from './core/executor';
+import { executor, defaultTools, extraBuiltinTools, type ToolCall, type ToolDef, b64Decode } from './core/executor';
 import { storage } from './core/storage';
-import { NS_FLAT, FLAT, LEGACY } from './core/keys';
+import { LEGACY } from './core/storage';
 import { ui } from './ui/ui';
-import { withHooks } from './core/withHooks';
-import { getSystemPrompt, getConfig, getBaseRequestBody, saveConfig, SYSTEM_PROMPT } from './model/config';
+import { DEFAULT_CONFIG, SYSTEM_PROMPT, normalizeConfig, type AppConfig } from './model/config';
+import { rehydrateHooks } from './tools/hooks';
 
 // 队列引擎的"继续推理"哨兵：工具跑完后压回 messageQueue 队首，引擎取出后只调 LLM、不提交新用户消息。
 const SENTINEL = { _infer: true } as unknown as ChatMessage;
@@ -37,6 +37,7 @@ const headlessSink: OutputSink = {
 };
 
 export const agent = {
+  config: { ...DEFAULT_CONFIG } as AppConfig, // 运行期配置单一真相源（内存）；持久化：storage.set('config', agent.config)
   messages: [] as ChatMessage[], // 已提交给 LLM 的全量上下文
   messageQueue: [] as ChatMessage[], // 待提交的用户/推理轮
   toolCallQueue: [] as ToolCall[], // 待执行的工具调用
@@ -58,8 +59,8 @@ export const agent = {
     llm.cancel();
   },
 
-  // 引擎：队列调度循环（withHooks，before 钩子管运行态）
-  engine: withHooks(async function () {
+  // 引擎：队列调度循环（由 hooks 工具在注册时经 wrapHook 包裹，before 钩子管运行态）
+  engine: async function () {
     try {
       while (agent.messageQueue.length || agent.toolCallQueue.length) {
         // ① 工具队列优先
@@ -93,15 +94,19 @@ export const agent = {
           // assistant 占位气泡：流式逐字更新依赖 lastAssistantEl，必须先建
           agent.output.append('assistant', '');
 
-          // 构建请求体：baseRequestBody 模板（编排可热更新）+ config.model 兜底；
-          // messages/stream/tools 经此请求体传入；before 钩子可编辑（streamChat.before 改 opts.args[0]）。
+          // 构建请求体：model 直接来自 config；系统提示作为 messages[0] 在构建时注入（单一真相源=config，无需钩子）。
+          // 其它请求参数（temperature/max_tokens/reasoning_effort/厂商扩展）不单独持久化，需要时用 chat.before 钩子注入（opts.args[0]）。
+          // before 钩子可在请求发出前编辑整个 body（chat.before 改 opts.args[0].messages/.tools/.model/温度等）。
           const tools = executor.list(); // 仅非 hidden 工具进 LLM 载荷
+          const cfg = agent.config;
           const body: ChatRequestBody = {
-            ...getBaseRequestBody(),
-            messages: agent.messages,
+            model: cfg.model,
+            messages: [
+              { role: 'system', content: cfg.systemPrompt ?? '' }, // 系统提示：构建请求时注入，非经钩子
+              ...agent.messages,
+            ],
             stream: true,
           };
-          if (typeof body.model !== 'string' || !body.model) body.model = getConfig().model; // model 兜底 config
           if (tools.length) {
             body.tools = tools.map((t) => ({
               type: 'function' as const,
@@ -110,9 +115,9 @@ export const agent = {
             body.tool_choice = 'auto';
           }
 
-          // 手动驱动迭代器：逐块更新 UI，结束(done)时 r.value 即 streamChat 的 return（完整 ChatResult）。
+          // 手动驱动迭代器：逐块更新 UI，结束(done)时 r.value 即 chat 的 return（完整 ChatResult）。
           // 以 return 的 toolCalls 为权威真相源，消除与引擎内累加器双重累积的漂移风险。
-          const it = llm.streamChat(body);
+          const it = llm.chat(body);
           let r = await it.next();
           let content = '', reasoning = '';
           while (!r.done) {
@@ -131,6 +136,14 @@ export const agent = {
           const toolCalls: ToolCallLite[] = final.toolCalls;
           agent.output.finalizeLast('assistant', content, reasoning || undefined);
 
+          // 日志：LLM 返回摘要（与 llm.ts 的"完成"日志呼应，便于交叉对照）
+          console.log('[MiniAgent.Agent] 📬 LLM 返回', {
+            contentLen: content.length,
+            reasoningLen: reasoning.length,
+            toolCalls: toolCalls.length,
+            toolCallNames: toolCalls.map((t) => t.function.name),
+          });
+
           agent.messages.push({
             role: 'assistant',
             content,
@@ -139,7 +152,12 @@ export const agent = {
           } as ChatMessage);
 
           agent.messageQueue.shift(); // 推理完成才弹出
-          if (toolCalls.length) agent.toolCallQueue.push(...toolCalls.map(toToolCall));
+          if (toolCalls.length) {
+            console.log('[MiniAgent.Agent] 🔧 推入工具队列', toolCalls.map((t) => ({ name: t.function.name, args: t.function.arguments })));
+            agent.toolCallQueue.push(...toolCalls.map(toToolCall));
+          } else {
+            console.log('[MiniAgent.Agent] ℹ️ 本轮无工具调用');
+          }
           continue;
         }
 
@@ -149,10 +167,10 @@ export const agent = {
       // 覆盖成功/异常/取消：复位运行态
       agent.output.setRunning(false);
     }
-  }),
+  },
 
   // 发送用户消息：入队 + 若引擎未跑则启动
-  sendMessage: withHooks(async function (text: string) {
+  sendMessage: async function (text: string) {
     agent.messageQueue.push({ role: 'user', content: text } as ChatMessage);
     agent.output.append('user', text);
     if (!agent._engineActive) {
@@ -169,36 +187,31 @@ export const agent = {
         agent._engineActive = false;
       }
     }
-  }),
+  },
   // 验收别名：控制台可经 agent.chat.sendMessage('...') 直接发消息并看到工具调用结果
   get chat() {
     return { sendMessage: (text: string) => agent.sendMessage(text) };
   },
 };
 
-// 迟绑 thisArg：engine / sendMessage 体内 this 指向 agent（局部上下文），避免 TDZ。
-(agent.engine as unknown as { __thisArg?: unknown }).__thisArg = agent;
-(agent.sendMessage as unknown as { __thisArg?: unknown }).__thisArg = agent;
+// 迟绑 thisArg（engine / sendMessage 体内 this 指向 agent）已移至 hooks 工具的 register 统一处理。
 
 // Agent 类型（供 executor 的 RunCtx/RegisterCtx 使用，类型引用避免运行时循环依赖）
 export type Agent = typeof agent;
 
-// 系统提示编排：独立 before 钩子注入（不写死在模块体），保持编排可插拔/可替换
-function orchestrateSystemPrompt(): void {
-  if (agent.messages.some((m) => m.role === 'system')) return; // 幂等：仅首次注入
-  const sys = getSystemPrompt();
-  if (sys) agent.messages.unshift({ role: 'system', content: sys } as ChatMessage);
-}
-Object.assign(orchestrateSystemPrompt, { __coreHook: true, __name: '系统提示注入', __hookId: 'sys-prompt-inject' });
-agent.sendMessage.beforeExe.push(orchestrateSystemPrompt);
+// === 钩子安装现已统一收口到各工具的 register 环节（钩子功能独立，见 src/tools/hooks.ts）===
+//  - 系统提示注入：不再经钩子——engine 构建 chat 请求体时直接把 config.systemPrompt 预置为 messages[0]
+//    （单一真相源=config，orchestrate.update 改 config 即下次请求生效）。
+//  - 运行态切换（发送按钮→停止按钮）：暂注释，待 UI 独立为 tool 后由其 register 安装（见下方 TODO）。
+// 核心不再在模块体里裸 push 钩子（呼应"核心不 import UI"铁律，运行态行为由 UI 工具自挂载）。
 
-// 运行态钩子：消息处理开始（点击发送那一刻）→ 发送按钮变身停止按钮（用户要求"通过 hook"）
-const setRunningHook = () => agent.output.setRunning(true, agent.chatStop);
-Object.assign(setRunningHook, { __coreHook: true, __name: '运行态切换', __hookId: 'sys-running-toggle' });
-agent.sendMessage.beforeExe.push(setRunningHook);
+// TODO（UI 独立后）：把运行态切换钩子改为 ui 工具的 register 安装，示例：
+//   const setRunningHook = () => agent.output.setRunning(true, agent.chatStop);
+//   installHook('sendMessage', 'before', setRunningHook, { id: 'sys-running-toggle', name: '运行态切换', toolName: 'ui', core: true });
+// （当前注释掉：避免核心直接引用 UI 形状；UI 作为 tool 挂载时自行接管运行态反馈）
 
 // 基本初始化（进工作循环前的一次性 bootstrap，属架构铁律允许的顶层副作用）：
-// ① 种子默认配置（落盘为扁平 config）；② 旧 default:config 由 getConfig 惰性迁回扁平 config（兼容历史数据）；
+// ① 读取扁平 config（缺失则迁回旧 default:config）并种子默认配置（落盘为扁平 config）；
 // ③ 绑定 agent 引用；④ 注册默认工具（→ 各 onRegister，含 session 落盘安装）；
 // ⑤ 重建持久化的自编排工具（→ onRegister 重建）。
 // ---- UI 作为 tool（§11：核心可无 UI 运行；UI 是工具清单里一个可禁用/启用的 tool）----
@@ -259,7 +272,7 @@ const uiTool: ToolDef = {
         return;
       }
       // 配置检查：apiKey 未配置时提示用户通过工具命令设置
-      if (!getConfig().apiKey) {
+      if (!agent.config.apiKey) {
         agent.output.append('user', text);
         agent.output.append('tool', CONFIG_HINT);
         return;
@@ -278,15 +291,22 @@ const uiTool: ToolDef = {
 };
 
 function init(): void {
-  const cfg = getConfig(); // 先取 config（含工具黑名单 disabledTools；旧 default:config 在此惰性迁回扁平 config）
-  if (!storage.get(NS_FLAT, FLAT.CONFIG)) storage.set(NS_FLAT, FLAT.CONFIG, cfg);
-  // 系统提示单一真相源 = config：若 config 尚无 systemPrompt（首次运行 / 历史存档），用源码种子 SYSTEM_PROMPT 写入 config，
-  // 运行期不再读源码常量（orchestrate 等只认 config）。
-  if (cfg.systemPrompt === undefined) saveConfig({ systemPrompt: SYSTEM_PROMPT });
-  // 一次性迁移：旧 default 命名空间下的键（sessions / baseRequestBody）迁回扁平键（与 config 同策略，兼容历史数据）
+  // 读取扁平 config（优先）；缺失则惰性迁回旧 default:config（兼容历史数据）
+  let raw = storage.get<Partial<AppConfig>>('config');
+  if (!raw) {
+    const legacyCfg = storage.get<Partial<AppConfig>>(LEGACY.CONFIG.ns, LEGACY.CONFIG.key);
+    if (legacyCfg) { raw = legacyCfg; storage.del(LEGACY.CONFIG.ns, LEGACY.CONFIG.key); }
+  }
+  const cfg = normalizeConfig(raw);
+  // 系统提示种子：首次运行 / 历史存档无 systemPrompt → 用源码种子 SYSTEM_PROMPT
+  if (cfg.systemPrompt === undefined) cfg.systemPrompt = SYSTEM_PROMPT;
+  agent.config = cfg;
+  storage.set('config', agent.config); // 落盘（含迁移 / 种子结果）
+  // 一次性迁移：旧 default 命名空间下其余键（sessions）迁回扁平键
   for (const legacy of Object.values(LEGACY)) {
+    if (legacy.key === LEGACY.CONFIG.key) continue; // config 已在上合并
     const v = storage.get(legacy.ns, legacy.key);
-    if (v !== undefined) { storage.set(NS_FLAT, legacy.key, v); storage.del(legacy.ns, legacy.key); }
+    if (v !== undefined) { storage.set(legacy.key, v); storage.del(legacy.ns, legacy.key); }
   }
   executor.attachAgent(agent);
   const disabled = new Set(cfg.disabledTools ?? []);
@@ -294,14 +314,15 @@ function init(): void {
   const bootList = [...defaultTools, ...extraBuiltinTools].filter((t) => !disabled.has(t.name)); // 黑名单直接移出名单（文档 §3/§5.2）
   executor.registerAll(bootList); // 拓扑序注册默认工具（已剔除黑名单）
   executor.rehydrateTools(); // 重建启用的自编排工具（拓扑序）
-  executor.rehydrateHooks(agent); // 重建用户钩子（热插拔，刷新不丢）
+  rehydrateHooks(agent); // 重建用户钩子（热插拔，刷新不丢）
 }
 init();
 
 // ---- 用户直接调用工具：/tool_name /param value /flag ----
 
 // 解析 /tool_name /param1 value1 /param2 value2 /flag 语法 → { name, args }
-// 值支持引号包裹、JSON 对象/数组、布尔、数字；/flag 无值时视为 true
+// 值支持引号包裹、JSON 对象/数组、布尔、数字；/flag 无值时视为 true；
+// /code 支持 b64: 前缀（经 b64Decode 解码），用于含任意字符的安全传输，彻底解耦"读到行尾"脆弱约定。
 function parseToolCommand(text: string): { name: string; args: Record<string, unknown> } | null {
   const body = text.slice(1).trim();
   const sp = body.search(/\s/);
@@ -329,6 +350,12 @@ function parseToolCommand(text: string): { name: string; args: Record<string, un
       if (next === -1) { val = rest; rest = ''; }
       else { val = rest.slice(0, next); rest = rest.slice(next); }
     }
+    // 13) /code 经 base64 编码（b64: 前缀）导出：优先识别并解码，彻底解耦"读到行尾"脆弱约定；
+    // 无前缀（手动输入）则回退到下方原逻辑读到行尾，向后兼容。
+    if (key === 'code' && val.startsWith('b64:')) {
+      try { args[key] = b64Decode(val.slice(4)); continue; } catch { /* 解码失败则保留原始值 */ }
+    }
+
     // 尝试 JSON 解析（对象/数组）
     if ((val.startsWith('{') && val.endsWith('}')) || (val.startsWith('[') && val.endsWith(']'))) {
       try { args[key] = JSON.parse(val); continue; } catch { /* 保持字符串 */ }
