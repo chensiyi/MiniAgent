@@ -1,6 +1,5 @@
+/// <reference path="../basement.d.ts" />
 import { GM_addStyle } from '$';
-import { executor } from '../core/executor';
-import { renderMarkdown } from '../tools/marked';
 
 // @require 注入的外部库，运行期在 userscript 全局作用域可用
 declare const DOMPurify: { sanitize(dirty: string, config?: Record<string, unknown>): string; [key: string]: unknown };
@@ -73,7 +72,7 @@ const STYLE = `
 // 工具启停面板：读 executor.allToolStates()，每行开关调 setEnabled（即时生效+持久化，§3）
 function renderToolsPanel(panel: HTMLElement): void {
   panel.replaceChildren();
-  for (const s of executor.allToolStates()) {
+  for (const s of MiniAgent.executor.allToolStates()) {
     const row = document.createElement('label'); row.className = 'ma-tool-row';
     const name = document.createElement('span'); name.className = 'ma-tool-name';
     name.textContent = s.author && s.author !== 'sys' ? `${s.name} @${s.author}` : s.name;
@@ -83,9 +82,9 @@ function renderToolsPanel(panel: HTMLElement): void {
     const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = s.enabled;
     cb.onchange = async () => {
       const next = cb.checked;
-      await executor.setEnabled(s.name, next);
+      await MiniAgent.executor.setEnabled(s.name, next);
       // 禁用被用户拒绝时 setEnabled 未生效（如关闭界面），复选框还原为实际启用态
-      const live = executor.list(true).some((t) => t.name === s.name);
+      const live = MiniAgent.executor.list(true).some((t) => t.name === s.name);
       if (cb.checked !== live) cb.checked = live;
     };
     row.append(name, desc, cb); panel.append(row);
@@ -112,7 +111,7 @@ function computeAc(text: string): { text: string; hint: string }[] {
   const after = text.slice(lastSpace + 1);
   const hasPrefix = lastSpace > 0;
   const propsOf = (name: string): Record<string, { description?: string; type?: string }> =>
-    (executor.list(true).find((t) => t.name === name)?.parameters?.properties ?? {}) as Record<string, { description?: string; type?: string }>;
+    (MiniAgent.executor.list(true).find((t) => t.name === name)?.parameters?.properties ?? {}) as Record<string, { description?: string; type?: string }>;
   const usedParams = (toolName: string, activeQ: string): Set<string> => {
     const used = new Set<string>(); const re = /\/(\S+)/g; let m: RegExpExecArray | null;
     while ((m = re.exec(text))) { const w = m[1]; if (w === toolName || w === activeQ) continue; used.add(w); }
@@ -128,10 +127,10 @@ function computeAc(text: string): { text: string; hint: string }[] {
   if (after.startsWith('/')) {
     const q = after.slice(1).toLowerCase();
     if (!hasPrefix) {
-      return executor.list(true)
+      return MiniAgent.executor.list(true)
         .filter((t) => t.name.toLowerCase().includes(q))
         .slice(0, 8)
-        .map((t) => ({ text: '/' + t.name + ' ', hint: t.description }));
+        .map((t) => ({ text: '/' + t.name + ' ', hint: t.description ?? '' }));
     }
     const toolName = text.slice(1, lastSpace).split(/\s+/)[0];
     return paramItems(toolName, q);
@@ -300,11 +299,11 @@ export const ui = {
         if (!text || !text.trim()) {
           c.textContent = reasoning ? '(模型已思考，本轮未返回正文)' : '(空响应)';
         } else {
-          try { setHTML(c, renderMarkdown(text)); } catch (e) { console.error('[MiniAgent.UI] renderMarkdown 异常:', e); c.textContent = text; }
+          try { setHTML(c, MiniAgent.renderMarkdown(text)); } catch (e) { console.error('[MiniAgent.UI] renderMarkdown 异常:', e); c.textContent = text; }
         }
       }
       const think = el.querySelector('.ma-think') as HTMLElement;
-      if (think) { if (reasoning) { const tb = el.querySelector('.ma-think-body') as HTMLElement; if (tb) setHTML(tb, renderMarkdown(reasoning)); } else think.remove(); }
+      if (think) { if (reasoning) { const tb = el.querySelector('.ma-think-body') as HTMLElement; if (tb) setHTML(tb, MiniAgent.renderMarkdown(reasoning)); } else think.remove(); }
     },
 
     // 运行态：发送变身停止（绑 onStop=agent.chatStop）并禁用输入

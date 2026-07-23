@@ -1,21 +1,33 @@
-import type { ToolDef } from '../core/executor';
-import { executor } from '../core/executor';
-import { storage, NS, OVERVIEW_NS, resolveSet, resolveDel } from '../core/storage';
+/// <reference path="../basement.d.ts" />
 import { GM_setValue, GM_deleteValue, GM_listValues, GM_getValue } from '$';
-import { installHook, uninstallToolHooks } from './hooks';
+
+// 消费经 @require 引入的 basement 全局（运行时已自动 init）
+const { agent, installHook, uninstallToolHooks } = MiniAgent;
+
+// 存储键常量（与 basement/src/core/storage.ts 同源；此处为环境层本地副本，避免跨 @require 导入）
+const NS_MEM = 'memory';
+const OVERVIEW_NS: string[] = ['session', 'tools', 'code', 'memory'];
+
+// 由 storage.set / storage.del 原始入参推导最终键（兼容 ns/key 双参与扁平单键两种调用）。
+// 与 basement 的 resolveSet/resolveDel 保持一致，保证内存键与落盘键完全一致。
+function resolveSet(nsOrKey: string, keyOrValue: unknown, value?: unknown): { key: string; val: unknown } {
+  if (value === undefined) return { key: nsOrKey, val: keyOrValue };
+  const ns = String(nsOrKey);
+  const key = String(keyOrValue);
+  return { key: ns ? `${ns}:${key}` : key, val: value };
+}
+function resolveDel(nsOrKey: string, key?: string): string {
+  return key === undefined ? nsOrKey : `${nsOrKey}:${key}`;
+}
 
 // 模块级幂等标志：GM_* → 内存 Map 镜像只需做一次（register 可能被多次调用）。
 let mirrored = false;
 
-// 1) 统一的持久存储管理（整合原 storage_get/set/list/del）
-//    action 区分操作：get=读取 / set=写入 / list=列出 / del=删除。
-//    删除为破坏性操作，仅 del 动作经 requestApproval 确认闸（其余动作无摩擦）。
-//
-// 2) 落盘能力（核心职责）：storage 本身是「内存 Map + CRUD」，不含任何 GM_* 写入；
-//    本工具在 register 时把 GM_* 一次性镜像进内存 Map，并包裹 storage.set / storage.del
-//    装上 GM 落盘 before 钩子，使一切 storage 写操作透明落盘——其它工具只管读 storage，无需关心运行环境。
-//    before 阶段落盘：若 GM 写入抛错（如配额超限），base（内存写入）被跳过，原方法不执行
-//    （hooks 契约：before 钩子抛错 → 不执行 base，见 hooks.ts wrapHook）。
+// 落盘能力（核心职责）：storage 本身是「内存 Map + CRUD」，不含任何 GM_* 写入；
+// 本工具在 register 时把 GM_* 一次性镜像进内存 Map，并包裹 storage.set / storage.del
+// 装上 GM 落盘 before 钩子，使一切 storage 写操作透明落盘——其它工具只管读 storage，无需关心运行环境。
+// before 阶段落盘：若 GM 写入抛错（如配额超限），base（内存写入）被跳过，原方法不执行
+// （hooks 契约：before 钩子抛错 → 不执行 base，见 hooks.ts wrapHook）。
 export const gmStorageTool: ToolDef = {
   name: 'gm_storage',
   author: 'sys',
@@ -54,22 +66,21 @@ export const gmStorageTool: ToolDef = {
         const raw = GM_getValue<string>(k, undefined as unknown as string);
         if (raw === undefined || raw === null) continue;
         try {
-          storage.set('', k, JSON.parse(raw));
+          agent.storage.set('', k, JSON.parse(raw));
         } catch {
-          storage.set('', k, raw);
+          agent.storage.set('', k, raw);
         }
       }
       mirrored = true;
     }
     // 落盘钩子（before 阶段）：先写 GM，再执行 base（内存写入）。
-    // installHook 内部会懒包裹 storage.set / storage.del（首次挂钩时自动 wrapHook 并就地替换回 storage 实例）。
     // 落盘失败（GM 抛错）→ before 抛错 → base 被跳过（见 hooks 契约）。
     installHook('storageSet', 'before', (opts) => {
-      const { key, val } = resolveSet(opts.args[0], opts.args[1], opts.args[2]);
+      const { key, val } = resolveSet(opts.args[0] as string, opts.args[1], opts.args[2]);
       GM_setValue(key, typeof val === 'string' ? val : JSON.stringify(val));
     }, { id: 'sys-gm-persist-set', name: 'GM 落盘(set)', toolName: 'gm_storage', core: true, agentRef: ctx.agent, execRef: ctx.executor });
     installHook('storageDelete', 'before', (opts) => {
-      GM_deleteValue(resolveDel(opts.args[0], opts.args[1]));
+      GM_deleteValue(resolveDel(opts.args[0] as string, opts.args[1] as string | undefined));
     }, { id: 'sys-gm-persist-del', name: 'GM 落盘(del)', toolName: 'gm_storage', core: true, agentRef: ctx.agent, execRef: ctx.executor });
     console.log('[MiniAgent] gm_storage 已挂载落盘钩子（storageSet/storageDelete → GM_*）');
   },
@@ -80,7 +91,7 @@ export const gmStorageTool: ToolDef = {
   },
   call: async (args, ctx) => {
     const action = String(args.action ?? '');
-    const ns = String(args.ns ?? NS.MEMORY);
+    const ns = String(args.ns ?? NS_MEM);
     switch (action) {
       case 'get': {
         const key = String(args.key ?? '');
@@ -106,19 +117,18 @@ export const gmStorageTool: ToolDef = {
       }
       case 'list': {
         if (args.ns) {
-          const keys = storage.keys(ns).sort((a, b) => a.localeCompare(b));
+          const keys = agent.storage.keys(ns).sort((a, b) => a.localeCompare(b));
           return JSON.stringify({ ns, count: keys.length, keys });
         }
         const overview: Record<string, string[]> = {};
-        for (const n of OVERVIEW_NS) overview[n] = storage.keys(n).sort((a, b) => a.localeCompare(b));
-        // 扁平键（config / sessions 等，无 ns 前缀）单列，避免概览里消失
-        overview.flat = storage.keys().filter((k) => !k.includes(':')).sort((a, b) => a.localeCompare(b));
+        for (const n of OVERVIEW_NS) overview[n] = agent.storage.keys(n).sort((a, b) => a.localeCompare(b));
+        overview.flat = agent.storage.keys().filter((k) => !k.includes(':')).sort((a, b) => a.localeCompare(b));
         return JSON.stringify(overview);
       }
       case 'del': {
         const key = String(args.key ?? '');
         if (!key) return '参数 key 缺失';
-        const ok = await executor.requestApproval({ name: `gm_storage:del ${ns}:${key}`, riskLevel: 'high' }, ctx.agent);
+        const ok = await ctx.executor.requestApproval({ name: `gm_storage:del ${ns}:${key}`, riskLevel: 'high' }, ctx.agent);
         if (!ok) return '用户拒绝了执行';
         ctx.storage.del(ns, key);
         return `已删除 ${ns}:${key}`;
