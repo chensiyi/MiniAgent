@@ -175,7 +175,7 @@ UI ──enqueue(user)──▶ [ chat 消息队列 ] ──▶ 主线程 loop (
 
 - `name` / `author`：唯一标识（组合）
 - `description`：给 LLM 看的用途说明（工具即界面，ACI）
-- `inputSchema`：参数结构（用于校验，并防止把注入文本塞进字段）
+- `parameters`：发给模型的 JSON Schema（OpenAI 标准字段名 `parameters`）。**required 只列通用必填项**（单用途工具=全部属性；action 类工具=仅 `action`，其余参数按 action 在 `call` 内自查）。`additionalProperties:false` 始终保证（防模型注入未知字段）。**strict 模式**（见 §12.2）仅当 `required` 覆盖全部属性时启用（structured outputs，模型被约束到该结构）；否则 `strict:false`、允许可选参数，由 `call` 内部校验——**tool 在复杂 action 下仍需自查，简单 action 下明确 required 的参数不再自查**。
 - `handler` / `call`：执行 / 调用入口（可选；无则不被 LLM 直调）
 - `riskLevel`：`low` / `medium` / `high` / `critical`（高危走确定性确认）
 - `deps`：`[{ name, author, version? }]`
@@ -184,7 +184,7 @@ UI ──enqueue(user)──▶ [ chat 消息队列 ] ──▶ 主线程 loop (
 
 - 注册器天然 = **白名单**：只有注册过的 tool 才存在、才跑得动（尤其是 `tools` 命名空间只加载开启项）。
 - `chat`（含 executor）是风险汇聚点，保留三样极简护栏：
-  1. 参数 `inputSchema` 校验；
+  1. **strict 模式结构约束**：工具 `parameters` 发给模型时 `additionalProperties:false` 始终保证（防注入未知字段）；`strict` 仅当该工具的 `required` 覆盖全部属性时为 `true`（structured outputs，模型被强制产出合规参数），**action 类工具 `required` 仅列 `action`、strict 为 false、允许可选参数**——结构约束由模型侧保证、可选参数缺失由 `call` 内部按 action 自查，运行期不另做全局 schema 校验；
   2. 按 `riskLevel` 对高风险 tool 走**确定性**确认（不由模型判断风险）；
   3. 安装期可选 **AI 审查代码** 分支（§6），对来源不明 tool 做发布前把关。
 - 全链路日志（plan / tool / args / result / error）支持回放。
@@ -214,7 +214,7 @@ UI 不是核心的一部分，而是一个**可插拔组件**（概念上的 too
    - 工具 / 核心经 `agent.extensions` **发现**能力，而非 `import` 或硬编码 `agent.ui`。
 
 3. **审批闸 `requestApproval`（executor 核心函数）**
-   - `executor.ts` 不再 `import { ui }`；改为导出核心 `requestApproval`（`withHooks`，可被 `orchestrate` 钩子接管），内部经 `ctx.agent.extensions.get('approval')` 委托给 UI；**headless 未挂载则自动放行**并记录。
+   - `executor.ts` 不再 `import { ui }`；改为导出核心 `requestApproval`（`withHooks`，可被用户钩子接管），内部经 `ctx.agent.extensions.get('approval')` 委托给 UI；**headless 未挂载则自动放行**并记录。
 
 ### 11.2 headless 行为对照
 
@@ -254,35 +254,41 @@ UI 已实现为内置 tool（`name: 'ui'`）：由 `agent.ts` 定义 `uiTool`（
 
 ### 12.2 llm 模块（`src/core/llm.ts`）
 - 无状态对象，只持 `config` 属性 + 标准方法 `chat` / `streamChat`，均为 HookedFunction 实例；历史在 `agent.messages`，llm 不持有。
-- 接口（2026-07-21 重构）：`streamChat(body: ChatRequestBody)` / `chat(body)` 直接接收**完整请求体**；`ChatRequestBody = { messages, stream?, tools?: ApiTool[], tool_choice?, model?, [k]: any }`；`ApiTool = { type:'function', function:{ name, description, inputSchema } }`。
+- 接口（2026-07-21 重构，2026-07-23 对齐 OpenAI 工具标准）：`streamChat(body: ChatRequestBody)` / `chat(body)` 直接接收**完整请求体**；`ChatRequestBody = { messages, stream?, tools?: ApiTool[], tool_choice?, model?, [k]: any }`；`ApiTool = { type:'function', function:{ name, description, strict, parameters } }`——`strict` 为布尔：仅当工具的 `required` 覆盖 `parameters` 全部属性时为 `true`（structured outputs，模型被约束到该结构）；action 类工具 `required` 仅列 `action` → `strict:false`、允许可选参数（由 `call` 内部按 action 自查）。`parameters` 即 OpenAI 标准字段名；`additionalProperties:false` 始终经 `ensureStrictSchema` 保证（防注入未知字段）。
 - 内部只从 `getConfig()` 取 `apiKey`/`baseURL`（传输层）；`body.messages` 保底空数组、`body.stream` 锁 `true`（SSE 要求）；**不再**内部拼 model/温度/合并 baseRequestBody（构建移到调用方 `agent.engine`）。
 - SSE 解析：按 `\n` 切物理行；`reasoning_content`/`reasoning` 增量累积 `reasoningContent` 并 yield `{ reasoning }`；`tool_calls` 按 `index` 累积（缺 index 时分配到下一空槽 `Object.keys(acc).length`，防多工具合并）；`usage`/`model`/`finish_reason` 末尾捕获。
 - 首类 `cancel()`：`llm._abort = new AbortController()`，signal 透传 gmFetch；`llm.cancel()` abort 在途。流式 `return` 完整 `ChatResult`（含 `toolCalls/reasoningContent/finishReason/usage/model`）——调用方以 `streamChat` 迭代器 `r.value`（done 时）为权威结果，勿在调用方另起并行累加器（曾因双累加器漂移修复：agent.ts 改手动迭代器消费 return 值）。
 - 参数补齐：`temperature`/`max_tokens`/`reasoning_effort` 仅当调用方显式给才下发；响应补齐 `reasoningContent/finishReason/usage/model`。
 
 ### 12.3 executor 模块（`src/core/executor.ts`）
-- `ToolDef = { name, author?, description, inputSchema, deps?, riskLevel?, call?, register?, unregister? }`；`DepRef = { name, author?, version? }`；**唯一标识 = `name+author`**。
+- `ToolDef = { name, author?, description, parameters, deps?, riskLevel?, call?, register?, unregister? }`；`DepRef = { name, author?, version? }`；**唯一标识 = `name+author`**。`parameters` 为发给模型的 JSON Schema（strict 模式：required 列全部属性 + `additionalProperties:false`），tool 不再运行时维护输入校验（§8）。
 - `register`/`unregister` 触发 `tool.register`/`tool.unregister`（同名先 unregister 再 register）；`registerAll` 先拓扑排序再注册（循环依赖→整体拒绝）；单 `register` 校验依赖（缺失→拒绝，author 不符→警告）。
 - 注册挂 `agent[name]` + `agent.tools`（Map）；`list(includeAll)` 默认返回有 `call` 的（进 LLM 清单），`list(true)` 全量；枚举/存储键/面板输出按**名称字母序**（确定性一致）。
 - `run` 注入 `RunCtx = { storage, executor, agent, this, console }`；确认闸 `riskAtLeast(tool.riskLevel, APPROVAL_RISK_LEVEL)`。
-- **运行时代码编译（沙箱）集中化（2026-07-21）**：所有 `new Function` 动态编译（工具 `code`/`register`/`unregister` 重建、`code_run` 自我执行、`orchestrate` 用户钩子）统一走 executor 顶层 `createSandboxFn`（`compileFn` 编译函数表达式、`compileBody` 编译函数体），禁止在调用链路散落裸 `new Function`；统一强制 `"use strict"` 且仅注入显式形参（ctx/opts/agent…），沙箱边界只在一处定义，便于审计加固。
+- **运行时代码编译（沙箱）集中化（2026-07-21）**：所有 `new Function` 动态编译（工具 `code`/`register`/`unregister` 重建、`run_js` 自我执行、`hooks` 用户钩子）统一走 executor 顶层 `createSandboxFn`（`compileFn` 编译函数表达式、`compileBody` 编译函数体），禁止在调用链路散落裸 `new Function`；统一强制 `"use strict"` 且仅注入显式形参（ctx/opts/agent…），沙箱边界只在一处定义，便于审计加固。
 - `requestApproval`（executor 导出核心函数，withHooks）：内部经 `ctx.agent.extensions.get('approval')` 委托 UI；headless 未挂载→**自动放行**并记录。所有原 `ui.requestApproval(...)` 调用改为 `requestApproval(..., ctx.agent)`。
 - `SYS_AUTHOR = 'sys'`（默认 author）；`executor` 导出 `extraBuiltinTools`（UI 注入枚举用，不 import UI）。
 - **默认工具（6 个）**：
+  - `hooks`（钩子系统内置工具 + 用户/LLM 界面：底层 `wrapHook` 方法 + 集中式 install/uninstall/rehydrate（`installHook`/`uninstallHookById`/`uninstallHookByName`/`uninstallToolHooks`/`restoreAllWrapped`）；`call` 提供 3 action：view（查看各钩子目标 sendMessage/engine/run/chat/requestApproval/storageSet 的运行期钩子清单（含 name/id）+ 工具清单 + 引擎 endpoint）/ addHook（high 确认闸，热挂接用户钩子存 `hooks:<id>`，`rehydrateHooks` 重建）/ removeHook（high 确认闸，按 hookId/name 移除并清持久化）。register 捕获宿主引用、懒包裹；unregister 经 `restoreAllWrapped` 还原全部被包裹函数）
   - `gm_storage`（`action` get/set/list/del；`del`=high 确认闸；`set` 支持 `/update true` 合并写）
-  - `code_run`（high 确认闸；经顶层沙箱 `compileBody(['ctx'], code)` 执行，return 值回显）
+  - `run_js`（high 确认闸；经顶层沙箱 `compileBody(['ctx'], code)` 执行，return 值回显）
   - `tool_manager`（`action` register/remove/list/export/export_cmd/list_disabled/delete；`register` 默认停用 `enabled=true` 才立即注册；`/libs` 参数=安装期从 CDN fetch 库源码内联进 code 见 §13；`export`=raw 自注册 IIFE、`export_cmd`=手动安装命令、`list_disabled`=列启用=false 的自编排工具；`delete`=经确认闸删除，`remove` 为其别名）
-  - `orchestrate`（5 action：view/update/setRequestBody/addHook/removeHook；后四 high；view 返回系统提示+7 钩子目标运行期数组+工具清单+引擎；addHook/removeHook 热插拔用户钩子存 `hooks:<id>`，`rehydrateHooks` 重建）
   - `session`（无 codeGenTool；**惰性创建**：register 仅装钩子、首条真实对话才建 `session:<id>`+扁平 `sessions` 索引；`action` info/save/list/create/switch/remove；会话 id 状态与 `flushSession` 落盘逻辑现定义于本工具文件 `src/tools/session.ts`，executor 核心不再持有）
   - `marked`（独立工具文件 `src/tools/marked.ts`，特殊例外见 §12.5；`call(text)` 把 markdown 渲染为 HTML，纯渲染、无副作用；ui 默认渲染器 `renderMarkdown` 亦出自此文件）
-- **引擎动态请求体（设计铁律）**：`baseRequestBody`（`config.ts` `getBaseRequestBody/setBaseRequestBody`，存扁平键 `baseRequestBody`）每轮合并进 streamChat 请求体（model 可被子覆盖，messages/stream 运行期填充；显式 `opts.temperature/maxTokens/reasoningEffort` 优先）；`orchestrate.view` 的 `engine = { endpoint:{model,baseURL}(来自扁平 config 键) + baseRequestBody }`，`setRequestBody` 热更新模板（无需重载）。**`config`=连哪个（baseURL/apiKey/model 端点），`baseRequestBody`=怎么问（温度/推理强度/厂商扩展/可覆盖 model），二者分离且引擎参数必须可经编排动态查看与编辑。**
+- **引擎动态请求体（设计铁律）**：`baseRequestBody`（`config.ts` `getBaseRequestBody/setBaseRequestBody`，存扁平键 `baseRequestBody`）每轮合并进 streamChat 请求体（model 可被子覆盖，messages/stream 运行期填充；显式 `opts.temperature/maxTokens/reasoningEffort` 优先）；`hooks.view` 的 `engine = { endpoint:{model,baseURL}(来自扁平 config 键) }`（baseRequestBody 见 §12.7，可经 config 动态编辑）。**`config`=连哪个（baseURL/apiKey/model 端点），`baseRequestBody`=怎么问（温度/推理强度/厂商扩展/可覆盖 model），二者分离且引擎参数必须可经编排动态查看与编辑。**
 - 工具 `/libs` 自包含机制：`resolveLibUrls(spec)`（完整 URL 原样；别名 `marked`/`dompurify`→jsDelivr；默认 spec→`https://cdn.jsdelivr.net/npm/<spec>`）返回 `{jsdelivr,unpkg,cdnjs}` 三源数组；安装期 `fetchLibText`（fetch 优先→`GM_xmlhttpRequest` 兜底）逐库取源码，任一失败→中断安装；内联成 IIFE `(function(){ <libs> \n return (<userCode>); })()` 存 `desc.code`，`new Function('"use strict"; return (' + code + ');')` 编译——工具自此自包含离线可用（"用内容替换自己"）。
 
+### 12.3.1 工具按需加载设计（对标 OpenAI 延迟加载 / 远程工具 / MCP）
+- OpenAI 近期工具标准支持**远程工具调用**与 **MCP 服务**，并提供一个**延迟加载（lazy load）**参数，让模型仅在需要时拉取某工具的完整定义。
+- 本项目的设计**已覆盖该意图且更轻**：工具可**卸载**（关闭即 `unregister`，定义仍留 `tools` 命名空间）；调用方经 `executor.list()` 了解当前可用工具，再**按需开启（`setEnabled(true)` / 注册）并调用指定 tool**。即"列表感知 → 启用 → 调用"的按需加载，无需引入 OpenAI 的 lazy 参数；且完全兼容未来接入远程工具 / MCP 服务（届时只是某个 tool 的 `call` 改为转发到远端 / MCP，契约不变）。
+- 因此**不引入** OpenAI 的 lazy-load 字段：现有 list/enable/call 三步模型即等价能力，且更可控（用户确认闸在启用/调用处）。
+
 ### 12.4 storage 模块（`src/core/storage.ts`）
-- 命名空间 API：`get/set/del/keys(ns, key?)`；`realKey`：空 ns → 扁平键（如 `config` / `baseRequestBody` / `sessions`），非空 → `ns:key`（如 `session:<id>` / `tools:name`）。
-- 分区：扁平键 `config` / `baseRequestBody` / `sessions`（无 ns，用户在 Tampermonkey 数值里可直接编辑）/ 命名空间 `session` / `tools` / `code` / `memory`。
+- **内存 Map + CRUD，落盘由 gm_storage 经 hook 提供**：`storage` 是 agent 内的一个内存 `Map<string, any>` 实例（`export const storage`），提供 `get/set/del/keys/listToolDefs`。它**不直接调用 GM_***——落盘（持久化到 GM_*）由 `gm_storage` 工具在 `register` 时经 `installHook('storageSet'/'storageDelete', 'before', …)` 挂接 GM 写钩子**透明完成**。其它工具只管读写 storage，无需关心运行环境（见 §12.3 gm_storage）。
+- 启动镜像：`storage.load()` 幂等地把 GM_* 一次性读入内存（`agent.init` 与 `gm_storage.register` 都会调用，确保注册顺序无关）。
+- 命名空间 API（兼容）：`get(nsOrKey, keyOrFallback?, fallback?)` / `set(nsOrKey, keyOrValue, value?)` / `del(nsOrKey, key?)` / `keys(ns?)`。单参=扁平键（如 `config`/`sessions`），双/三参=`ns:key`（如 `session:<id>`/`tools:name`）；`realKey` 把二者统一成字符串键。`resolveSet`/`resolveDel` 供 gm_storage 落盘钩子复用，保证内存键与落盘键完全一致。
+- 分区：扁平键 `config` / `sessions`（无 ns，用户在 Tampermonkey 数值里可直接编辑）/ 命名空间 `session` / `tools` / `hooks` / `code` / `memory`。
 - `listToolDefs()` 读 `tools` 全量（系统真相源）；`get` 真泛型。
-- `set` 保留 `withHooks(...)` 包装作扩展点（曾经 `bus.emit` 广播，bus 已删，不再挂钩子）。
 
 ### 12.5 ui 模块（`src/ui/ui.ts`）+ marked 渲染（独立工具文件 `src/tools/marked.ts`）
 - v4 玻璃**方框**无圆角浅色字（不挂背景板/标题栏；`--glass:rgba(18,26,44,.52)`、`--text:#eef2ff`、品牌 `#378DDD`、风险 high 橙 `#fb923c`）；气泡区 `mask-image` 顶部渐隐。
@@ -298,17 +304,16 @@ UI 已实现为内置 tool（`name: 'ui'`）：由 `agent.ts` 定义 `uiTool`（
 ### 12.6 agent 模块（`src/agent.ts`）
 - 全局单例 `globalThis.agent`；**解耦铁律**：引擎/`sendMessage`/`handleToolCommand` 只写 `agent.output`（OutputSink 契约，默认 headless 空实现），绝不直连 ui；核心经 `agent.extensions`（Map 通用能力表）发现 UI 能力，不硬引用 `agent.ui`。
 - 队列引擎（engine）：两队列 `messageQueue`/`toolCallQueue` + SENTINEL 驱动；`running = messageQueue.length || toolCallQueue.length`（peek 不弹，在途期间队列非空，派生正确）。
-- `init()`：`migrateFlatToNs` → `getConfig`（含 `disabledTools` 黑名单）→ `executor.attachAgent` → `registerAll(bootList 剔除黑名单)` → `rehydrateTools` → `rehydrateHooks`。
+- `init()`：`executor.attachAgent` → `storage.load()`（GM_* 镜像进内存）→ 先注册核心 `hooks`+`gm_storage`（后者安装落盘钩子）→ 读/写 `config`（落盘经 gm_storage 钩子）→ 剔除黑名单注册其余默认工具 → `rehydrateTools` → `rehydrateHooks`。`hooks`/`gm_storage` 不受黑名单约束（持久化与引擎钩子根基）。
 - `orchestrateSystemPrompt` 走 `sendMessage.beforeExe` 幂等钩子；运行态按钮 `sendMessage.beforeExe setRunning(true)` + engine.finally `setRunning(false)`。
 - `mount()` = 唯一 UI 接入点（设 output + 注册 extensions）；仅 dev 分支挂 `unsafeWindow.agent`（`__BUILD_BRANCH__==='dev'` 守卫），发布分支不挂。
 - `uiTool`（定义于此）：`register` 挂载 DOM+接 output/extensions、`unregister` 卸载+还原 headless，经 `extraBuiltinTools` 注入枚举；持久化最小启动器 `#miniagent-launcher`（UI 卸载后重开入口，独立于已卸载 UI）。
 - `parseToolCommand()` / `handleToolCommand()`：解析 `/tool /param value /flag` 语法，绕过 LLM 直接调 `executor.run`（`/` 开头→工具命令；apiKey 空→提示配置；否则正常 sendMessage）。
 
 ### 12.7 config 模块（`src/model/config.ts`）
-- `AppConfig`（含 `disabledTools?: string[]` 黑名单、`apiKey`/`baseURL`/`model`）；`getConfig/saveConfig`。
-- `SYS_AUTHOR`、`RiskLevel` + `APPROVAL_RISK_LEVEL='high'` + `riskAtLeast()`。
-- `getBaseRequestBody/setBaseRequestBody`、`getSystemPrompt`（读扁平 `config.systemPrompt`，单一真相源）。`orchestrate.update` 经 `saveConfig({ systemPrompt })` 写入同一 blob；首次运行由 `init()` 用源码种子 `SYSTEM_PROMPT` 写入 config，**运行期不再回退源码常量**（消除"源码 + config"双源定义分歧）。
-- `SYSTEM_PROMPT`：工具说明同步（gm_storage/tool_manager/orchestrate/session/code_run）；明确"code_run 由系统自动弹确认框，你无需文字确认，直接调用"（避免双重确认）。
+- **纯数据定义，无 CRUD / 无持久化**：`AppConfig`（含 `disabledTools?: string[]` 黑名单、`apiKey`/`baseURL`/`model`、`systemPrompt?`）、`DEFAULT_CONFIG`、`SYSTEM_PROMPT`、`REQUIRE_CODE_APPROVAL`、`RiskLevel`+`APPROVAL_RISK_LEVEL`+`riskAtLeast`、`normalizeConfig`（合并默认值回落）、`getSystemPrompt`。**本模块不提供任何存取方法**——config 只是 storage 内的一个值（key=`config`），存取统一走 `agent.storage.get/set('config')`（落盘由 gm_storage 钩子自动完成）。
+- `agent.config` 是 agent 上的 getter/setter：getter 读 `storage.get('config')`（缺省回落 `DEFAULT_CONFIG`），setter 经 `storage.set('config', v)` 写回（触发 gm_storage 落盘钩子）。engine / ui / executor 照常经 `agent.config.xxx` 读取，无感。
+- `SYSTEM_PROMPT`：工具说明同步（gm_storage/tool_manager/hooks/session/run_js）；明确"run_js 由系统自动弹确认框，你无需文字确认，直接调用"（避免双重确认）。
 
 ## 13. 外部库加载策略（最终方案）
 
@@ -363,8 +368,8 @@ UI 已实现为内置 tool（`name: 'ui'`）：由 `agent.ts` 定义 `uiTool`（
 ## 16. 已知技术债与阶段3待办
 
 - **已修复**（2026-07-21）：流式工具调用 3 脆弱点——①双累加器冗余（agent.ts 改手动迭代器消费 `streamChat` return 值）；②缺 `index` 多工具合并（`tc.index ?? Object.keys(acc).length`）；③推理未写回历史（`ChatMessage` 加 `reasoning_content`，推送 assistant 带 `reasoning_content`）。
-- **待办（阶段3 可选）**：① `max-iter` 工具循环防护（用户定"暂不加"）；② `inputSchema` 参数校验（文档 §9 三护栏之一，run() 未校验）；③ 安装期 AI 审查代码分支（§6）；④ 上下文/权限管理（CallCtx 仅 TODO 占位，不进运行时）；⑤ system/control 消息类型与 turn 原子性（§4 队列已实现，消息类型枚举未全做）。
-- 取消/停止：`cancel()` 仅中断 LLM 流，code_run 确认等待期间点"停止"无效（已知小问题，未处理）。
+- **待办（阶段3 可选）**：① `max-iter` 工具循环防护（用户定"暂不加"）；② ~~`parameters` 参数校验~~ → **已覆盖**：`strict:true` 模式下结构约束由模型侧保证（structured outputs，见 §9/§12.2），`run()` 不再运行时校验（用户 2026-07-23 决定 tool 不再维护输入检查）；③ 安装期 AI 审查代码分支（§6）；④ 上下文/权限管理（CallCtx 仅 TODO 占位，不进运行时）；⑤ system/control 消息类型与 turn 原子性（§4 队列已实现，消息类型枚举未全做）。
+- 取消/停止：`cancel()` 仅中断 LLM 流，run_js 确认等待期间点"停止"无效（已知小问题，未处理）。
 
 ## 17. 关键纠错与教训（历史记录，避免重复踩坑）
 

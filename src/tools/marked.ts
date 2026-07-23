@@ -61,12 +61,13 @@ export const markedTool: ToolDef = {
   name: 'marked',
   author: 'sys',
   description: 'Markdown 渲染工具：把 markdown 文本渲染为（经 DOMPurify 清洗的）HTML 字符串并返回。可用于把任意 markdown 源转成 HTML。纯渲染，无副作用。',
-  inputSchema: {
+  parameters: {
     type: 'object',
     properties: {
       text: { type: 'string', description: '要渲染的 markdown 源文本' },
     },
     required: ['text'],
+    additionalProperties: false,
   },
   call: (_args) => renderMarkdown(String(_args.text ?? '')),
 };

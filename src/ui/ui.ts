@@ -102,14 +102,14 @@ let onSendRef: ((text: string) => void) | null = null;
 let toolsPanelEl: HTMLElement | null = null;
 let toggleBtnEl: HTMLButtonElement | null = null;
 
-// 手动工具命令自动补全：/tool 补工具名，/tool /param 补参数（显示 inputSchema.properties[param].description）
+// 手动工具命令自动补全：/tool 补工具名，/tool /param 补参数（显示 parameters.properties[param].description）
 function computeAc(text: string): { text: string; hint: string }[] {
   if (!text.startsWith('/')) return [];
   const lastSpace = text.lastIndexOf(' ');
   const after = text.slice(lastSpace + 1);
   const hasPrefix = lastSpace > 0;
   const propsOf = (name: string): Record<string, { description?: string; type?: string }> =>
-    (executor.list(true).find((t) => t.name === name)?.inputSchema?.properties ?? {}) as Record<string, { description?: string; type?: string }>;
+    (executor.list(true).find((t) => t.name === name)?.parameters?.properties ?? {}) as Record<string, { description?: string; type?: string }>;
   const usedParams = (toolName: string, activeQ: string): Set<string> => {
     const used = new Set<string>(); const re = /\/(\S+)/g; let m: RegExpExecArray | null;
     while ((m = re.exec(text))) { const w = m[1]; if (w === toolName || w === activeQ) continue; used.add(w); }

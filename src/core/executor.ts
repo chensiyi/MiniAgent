@@ -5,13 +5,12 @@ import { markedTool } from '../tools/marked';
 import { REQUIRE_CODE_APPROVAL, APPROVAL_RISK_LEVEL, riskAtLeast, type AppConfig } from '../model/config';
 import { hooksTool, uninstallToolHooks } from '../tools/hooks';
 import { gmStorageTool } from '../tools/gm_storage';
-import { codeRunTool } from '../tools/code_run';
+import { runJsTool } from '../tools/run_js';
 import { toolManagerTool } from '../tools/tool_manager';
-import { orchestrateTool } from '../tools/orchestrate';
 import { sessionTool } from '../tools/session';
 
 // 核心审批闸：定义见下方 executor 对象的 requestApproval 属性（已由 hooks 工具在注册时经 wrapHook 包裹，
-// 可被 orchestrate 钩子接管）。经通用能力注册表取 UI 提供的审批能力；核心不硬引用 ui 模块——
+// 可被用户钩子接管）。经通用能力注册表取 UI 提供的审批能力；核心不硬引用 ui 模块——
 // UI 作为可插拔组件挂载时注册 'approval' 能力，headless 未挂载则自动放行。
 
 // executor 的结构化视图（避免 typeof executor 前向引用）
@@ -24,12 +23,16 @@ export interface ExecutorLike {
   setEnabled(name: string, enabled: boolean): Promise<void>;
   allToolStates(): { name: string; author?: string; enabled: boolean; builtin: boolean; description?: string }[];
   run(call: ToolCall, agentArg?: AgentLike): Promise<string>;
+  requestApproval(
+    call: { name: string; code?: unknown; riskLevel?: string },
+    agentRef?: AgentLike,
+  ): Promise<boolean>;
 }
 
 // agent 的结构化视图：executor 仅依赖这个最小接口（不 import agent 模块，消除循环依赖）。
 // 实际传入的是全局 agent 单例（Agent = typeof agent），结构超集，可赋值。
 export interface AgentLike {
-  config: AppConfig; // 运行期配置单一真相源（内存）；持久化：storage.set('config', agent.config)
+  config: AppConfig; // 运行期配置单一真相源（内存）；经 config setter 由 gm_storage 落盘钩子透明持久化
   messages: ChatMessage[];
   sessionId: string;
   storage: typeof storage;
@@ -71,7 +74,7 @@ export interface ToolDef {
   name: string;
   author?: string; // 唯一标识组成（与 name 组合）
   description: string;
-  inputSchema: Record<string, unknown>; // JSON Schema（文档称 inputSchema；校验 + 防注入）
+  parameters: Record<string, unknown>; // 发给模型的 JSON Schema（OpenAI 标准字段名 parameters）：strict 模式由模型强制约束结构（required 列全属性 + additionalProperties:false）；tool 自身不再运行时维护输入校验（见 §8/§12.3）
   deps?: DepRef[]; // 前置依赖：按 name 匹配；author 不符→警告可继续（§5）
   riskLevel?: 'low' | 'medium' | 'high' | 'critical'; // 高危走确定性确认（§6/§9；阶段2接线）
   call?: (args: Record<string, unknown>, ctx: RunCtx) => Promise<string> | string; // 执行入口；有 call 才进 LLM 清单（§7）
@@ -84,7 +87,7 @@ export interface ToolDesc {
   name: string;
   author?: string;
   description: string;
-  inputSchema: Record<string, unknown>;
+  parameters: Record<string, unknown>; // 同 ToolDef.parameters：发给模型的 JSON Schema（strict 模式，模型强制约束）
   deps?: DepRef[];
   riskLevel?: 'low' | 'medium' | 'high' | 'critical';
   code: string; // call 源码：(args, ctx) => string
@@ -93,9 +96,10 @@ export interface ToolDesc {
   enabled?: boolean; // 启停状态（§3：关闭项留 ns、不注册）
 }
 
-// LLM 实际发出的调用（tool_calls 解析后的产物）
+// LLM 实际发出的调用（tool_calls 解析后的产物）；type 显式声明为 function，与 OpenAI tool call 格式对齐
 export interface ToolCall {
   id: string;
+  type: 'function';
   name: string;
   args: Record<string, unknown>;
 }
@@ -199,7 +203,7 @@ export function resolveToolDesc(name: string): ToolDesc | undefined {
     name: live.name,
     author: live.author,
     description: live.description,
-    inputSchema: live.inputSchema,
+    parameters: live.parameters,
     deps: live.deps,
     riskLevel: live.riskLevel,
     code: live.call ? live.call.toString() : '',
@@ -222,8 +226,7 @@ export async function deleteTool(name: string, agent: AgentLike): Promise<string
       // 内置工具：无 tools 命名空间描述符 → 追加黑名单，重载不回注
       const set = new Set(agent.config.disabledTools ?? []);
       set.add(name);
-      agent.config.disabledTools = [...set];
-      storage.set('config', agent.config); // 持久化：改内存即落盘
+      agent.config.disabledTools = [...set]; // setter 触发 gm_storage 落盘钩子
     }
   executor.unregister(name); // 移除运行期注册（含还原其 register/unregister 编排）
   return `已删除工具 ${name}`;
@@ -381,7 +384,7 @@ export const executor = {
       const set = new Set(_agent?.config.disabledTools ?? []);
       if (enabled) set.delete(name);
       else set.add(name);
-      if (_agent) { _agent.config.disabledTools = [...set]; storage.set('config', _agent.config); }
+      if (_agent) { _agent.config.disabledTools = [...set]; } // setter 触发 gm_storage 落盘钩子
     }
     if (enabled) {
       if (desc) {
@@ -414,9 +417,9 @@ export const executor = {
   },
 
   // 执行一个工具调用，返回"观察结果"文本，回灌给 LLM 作为 tool 消息。
-  // 危险工具确认闸在 base 内（code_run 或 riskLevel≥high/critical 时 await executor.requestApproval(..., ctx.agent)）。
+  // 危险工具确认闸在 base 内（run_js 或 riskLevel≥high/critical 时 await executor.requestApproval(..., ctx.agent)）。
   // ctx.agent / ctx.this 由调用方（engine）注入，避免 executor 依赖 agent。
-  // 核心审批闸（带钩子，可被 orchestrate 钩子接管）：见 requestApproval 属性
+  // 核心审批闸（带钩子，可被用户钩子接管）：见 requestApproval 属性
   requestApproval: async function (
     call: { name: string; code?: unknown; riskLevel?: string },
     agentRef?: AgentLike,
@@ -446,7 +449,7 @@ export const executor = {
 
     // 确定性确认闸（高危 = 不由模型判断风险；阈值可配，文档 §6/§9）
     const needApproval =
-      REQUIRE_CODE_APPROVAL && (call.name === 'code_run' || riskAtLeast(tool.riskLevel, APPROVAL_RISK_LEVEL));
+      REQUIRE_CODE_APPROVAL && (call.name === 'run_js' || riskAtLeast(tool.riskLevel, APPROVAL_RISK_LEVEL));
     if (needApproval) {
       const code = call.args.code;
       const ok = await executor.requestApproval({ name: call.name, code, riskLevel: tool.riskLevel }, agentRef);
@@ -485,17 +488,16 @@ export const executor = {
   // 用户钩子重建见 src/tools/hooks.ts 的 rehydrateHooks（由 agent.init 调用）。
 };
 
-// 钩子体编译器见 ./sandbox 的 compileHook（由 hooks.ts 的 rehydrateHooks / orchestrate 的 addHook 调用）。
+// 钩子体编译器见 ./sandbox 的 compileHook（由 hooks.ts 的 rehydrateHooks / hooks 的 call(addHook) 调用）。
 
 // 默认工具清单（统一能力面）：领域工具 + 自开发工具 + 系统编排管理。
 // 各工具定义已迁至 src/tools/（与 hooks/marked 同例）；全部由 agent.init() 注册；
-// orchestrate 带 call（进 LLM 日常载荷，供自我编排查看/热更新运行期钩子与系统提示）。
+// hooks 工具既提供 wrapHook 等底层方法，又带 call（进 LLM 日常载荷，供查看/热更新运行期钩子）。
 export const defaultTools: ToolDef[] = [
   hooksTool, // 钩子系统：注册即初始化（统一包裹核心函数），须先于其它工具注册
   gmStorageTool,
-  codeRunTool,
+  runJsTool,
   toolManagerTool,
-  orchestrateTool,
   sessionTool,
   markedTool,
 ];

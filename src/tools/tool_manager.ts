@@ -42,7 +42,7 @@ function exportToolToJs(desc: ToolDesc): string {
   parts.push(`    name: ${JSON.stringify(desc.name)},`);
   parts.push(`    author: ${JSON.stringify(desc.author ?? SYS_AUTHOR)},`);
   parts.push(`    description: ${JSON.stringify(desc.description)},`);
-  parts.push(`    inputSchema: ${indentBlock(JSON.stringify(desc.inputSchema ?? {}, null, 2), '    ')},`);
+  parts.push(`    parameters: ${indentBlock(JSON.stringify(desc.parameters ?? {}, null, 2), '    ')},`);
   if (desc.deps && desc.deps.length) parts.push(`    deps: ${indentBlock(JSON.stringify(desc.deps, null, 2), '    ')},`);
   if (desc.riskLevel) parts.push(`    riskLevel: ${JSON.stringify(desc.riskLevel)},`);
   parts.push(`    code: ${desc.code},`);
@@ -62,7 +62,7 @@ function exportToolToJs(desc: ToolDesc): string {
 // 与 parseToolCommand（agent.ts）的解析规则严格对齐：
 //   - /code 值经 base64 编码（b64: 前缀）输出，字符集不含空格，含引号/斜杠/换行均安全；
 //     彻底解耦"未加引号值读到行尾"的脆弱约定（见 b64Decode / parseToolCommand）。
-//   - 对象/数组值（inputSchema/deps）用紧凑 JSON（无多余空格），解析器识别 {…}/[…] 走 JSON.parse；
+//   - 对象/数组值（parameters/deps）用紧凑 JSON（无多余空格），解析器识别 {…}/[…] 走 JSON.parse；
 //   - description 用双引号包裹（读到匹配引号）。
 // 说明：命令格式无法可靠承载多个函数体，含 register/unregister 安装钩子的工具请改用 export（raw JS）。
 function exportToolToCmd(desc: ToolDesc): string | { error: string } {
@@ -74,7 +74,7 @@ function exportToolToCmd(desc: ToolDesc): string | { error: string } {
   if (desc.author && desc.author !== SYS_AUTHOR) parts.push('/author', desc.author);
   if (desc.riskLevel) parts.push('/riskLevel', desc.riskLevel);
   parts.push('/enabled', desc.enabled === false ? 'false' : 'true');
-  parts.push('/inputSchema', JSON.stringify(desc.inputSchema ?? { type: 'object', properties: {} }));
+  parts.push('/parameters', JSON.stringify(desc.parameters ?? { type: 'object', properties: {} }));
   if (desc.deps && desc.deps.length) parts.push('/deps', JSON.stringify(desc.deps));
   parts.push('/description', '"' + desc.description + '"');
   // /code 经 base64 编码（b64: 前缀）输出：彻底解耦"必须放最后读到行尾"的脆弱约定，
@@ -89,7 +89,7 @@ export const toolManagerTool: ToolDef = {
   name: 'tool_manager',
   author: 'sys',
   description: '统一的工具自编排管理。action 取值：register=注册/创建新工具（持久化到 tools 命名空间，重载按依赖拓扑自动重建；code 为 call 源码，register 可选为安装源码；默认停用，enabled=true 立即启用）；remove/delete=删除工具（移除持久化并注销；内置工具删除后加入黑名单，重载不回注）；list=枚举当前所有已注册工具（含无 call 的系统原语，默认全量；传 all=false 仅列可被 LLM 调用的工具），供查看完整能力面；export=导出工具为可直接注册的 raw JS 代码（控制台粘贴即用）；export_cmd=导出工具为手动安装命令（/tool_manager /action register …，聊天输入框粘贴即用；含 register/unregister 安装钩子的工具不支持，请改用 export）。注：自编排工具导出自包含（含 /libs 内联库）；内置（sys）工具导出的 call 来自函数反编译，可能引用模块内部状态，仅作查看/参考，不保证可独立运行；list_disabled=列出所有已停用的自编排工具。',
-  inputSchema: {
+  parameters: {
     type: 'object',
     properties: {
       action: {
@@ -100,9 +100,10 @@ export const toolManagerTool: ToolDef = {
       name: { type: 'string', description: '工具名（register/remove/delete/export/export_cmd 必需）。按 name 匹配（注册时与 author 组合成唯一标识）。' },
       author: { type: 'string', description: `可选作者名（默认 "${SYS_AUTHOR}"；与 name 组合唯一；覆盖既有工具即替换，需用户确认）。` },
       description: { type: 'string', description: '工具说明（register 必需），会展示给 LLM 作为该工具的能力描述。' },
-      inputSchema: {
+      parameters: {
         type: 'object',
-        description: '新工具的参数声明（JSON Schema，register 必需）。格式如 { type:"object", properties: { 参数名: { type, description, ... } }, required: ["参数名"] }，会直接传给 LLM 决定如何调用。',
+        additionalProperties: false,
+        description: '新工具的参数声明（JSON Schema，register 必需）。格式如 { type:"object", properties: { 参数名: { type, description, ... } }, required: ["参数名"], additionalProperties:false }，会直接传给 LLM 决定如何调用（strict 模式：required 必须列全部属性）。',
       },
       deps: { type: 'array', description: '可选前置依赖，元素形如 { name, author?, version? }；按 name 匹配，author 不符仅警告、缺失则拒绝注册。' },
       riskLevel: {
@@ -117,6 +118,7 @@ export const toolManagerTool: ToolDef = {
       all: { type: 'boolean', description: 'list 动作专用：是否枚举全量工具。默认 true（=全量，含无 call 的系统原语）；传 false 则仅列出可被 LLM 调用的工具（typeof call===\'function\'）。' },
     },
     required: ['action'],
+    additionalProperties: false,
   },
   call: async (args, ctx) => {
     const action = String(args.action ?? '');
@@ -128,7 +130,9 @@ export const toolManagerTool: ToolDef = {
         const enabled = args.enabled === true; // 默认停用（§3：关闭项留 ns、不注册）
         // 安装期依赖库 fetch + 内联（"用内容替换自己"）：默认 jsDelivr，失败则中断安装并提示
         const libsSpec = args.libs ? String(args.libs) : '';
-        let code = String(args.code ?? '');
+        const codeRaw = String(args.code ?? '');
+        if (!codeRaw.trim()) return '参数 code 缺失（register 必需，call 源码）';
+        let code = codeRaw;
         if (libsSpec) {
           const specs = libsSpec.split(',').map((s) => s.trim()).filter(Boolean);
           const sources: string[] = [];
@@ -150,7 +154,7 @@ export const toolManagerTool: ToolDef = {
           name,
           author: authorArg,
           description: String(args.description ?? ''),
-          inputSchema: (args.inputSchema as Record<string, unknown>) ?? { type: 'object', properties: {} },
+          parameters: (args.parameters as Record<string, unknown>) ?? { type: 'object', properties: {} },
           deps: (args.deps as DepRef[]) ?? undefined,
           riskLevel: (args.riskLevel as ToolDesc['riskLevel']) ?? undefined,
           code, // 已内联依赖库源码（安装期 fetch 结果）

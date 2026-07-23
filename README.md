@@ -27,7 +27,7 @@
 | **chat / engine** | 大模型交互循环：压消息入队列、驱动 LLM、产出文本 / tool_call | 否 |
 | **ui.chat** | UI 渲染层：输入 / 气泡 / send-stop / 流式 / 工具开关面板 | 否（调用 Agent 的注册能力） |
 | **tool** | 注册单元：声明 `name+author` / `deps`，可选 `call` | 否（被注册的对象） |
-| **code_run** | 一个 tool（有 `call`），提供一次性代码执行能力 | 否 |
+| **run_js** | 一个 tool（有 `call`），提供一次性 JS 代码执行能力 | 否 |
 | **tool_manager** | 暴露给 LLM 的统一工具自编排管理 tool（action=register/remove/list）；LLM 经 tool_call 调用它来注册/删除/枚举 tool | 否（包装 `executor.register`/`unregister`） |
 | **tools 命名空间** | 持久化所有 tool 定义的存储命名空间（真相源） | — |
 
@@ -102,7 +102,7 @@
 
 - `name` / `author`：唯一标识（组合）
 - `description`：给 LLM 看的用途（工具即界面，ACI）
-- `inputSchema`：参数结构（JSON Schema；校验为阶段 3 待做）
+- `parameters`：发给模型的 JSON Schema（OpenAI 标准字段名 `parameters`）。`required` 只列通用必填（单用途工具=全部属性；action 类工具=仅 `action`，其余参数由 `call` 按 action 自查）；`additionalProperties:false` 始终保证。`strict` 仅当 `required` 覆盖全部属性时为 `true`（structured outputs），否则 `false`、允许可选参数。
 - `call`：执行入口（可选；无则不被 LLM 直调）
 - `riskLevel`：`low` / `medium` / `high` / `critical`
 - `deps`：`[{ name, author, version? }]`
@@ -142,4 +142,4 @@ npm run typecheck # tsc --noEmit
 
 - **阶段 1 已完成**：工具契约 + 拓扑排序注册 + 按名挂载 + list-by-call + 确认闸 riskLevel。
 - **阶段 2 已完成**：riskLevel 配置化 + 工具启停面板 + setEnabled/allToolStates + unsafeWindow.agent 暴露。
-- **阶段 3（可选）**：消息类型 system/control 与 turn 原子性、安装期 AI 审查、inputSchema 参数校验。
+- **阶段 3（可选）**：消息类型 system/control 与 turn 原子性、安装期 AI 审查（parameters 参数校验已由 `strict:true` 模式由模型侧覆盖）。

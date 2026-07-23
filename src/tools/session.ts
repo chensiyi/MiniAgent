@@ -67,16 +67,17 @@ export function flushSession(agent: AgentLike, st: typeof storage): void {
 //    注意【惰性创建】：注册时不再立即写空记录，而是首次真实对话（afterExe 触发）才创建
 //    session:<id> 记录并写入扁平 sessions 索引——避免每次页面刷新都产生空会话污染存储。
 //    幂等：installHook 同 id 重注册就地替换，不累积；unregister 经 uninstallToolHooks('session') 一次性清理。
-//    支持 action：info / save / list / create / switch / remove（详见 inputSchema）。
+//    支持 action：info / save / list / create / switch / remove（详见 parameters）。
 //    会话 id 状态与落盘逻辑现由本工具自持（见 §1/§2），executor 核心不再持有。
 export const sessionTool: ToolDef = {
   name: 'session',
   author: 'sys',
+  deps: [{ name: 'hooks', author: 'sys' }],
   description:
     '会话管理：注册后自动把对话消息落盘到 session 命名空间（session:<id>），并在扁平 sessions 建索引。' +
     'action：info=查看当前会话(默认)；save=立即落盘；list=列出全部会话；create=开新会话并清空上下文；' +
     'switch=切换到指定会话(id必填)；remove=删除指定会话(id必填，删当前则自动开新会话)。',
-  inputSchema: {
+  parameters: {
     type: 'object',
     properties: {
       action: {
@@ -86,6 +87,8 @@ export const sessionTool: ToolDef = {
       },
       id: { type: 'string', description: 'switch / remove 的目标会话 id' },
     },
+    required: ['action'],
+    additionalProperties: false,
   },
   register: (ctx) => {
     const id = genSessionId();

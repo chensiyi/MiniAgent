@@ -1,7 +1,7 @@
 // sandbox.ts：沙箱编译家族（用户代码编译的唯一入口）。
 //
 // 设计（用户 2026-07-21 / 2026-07-23 抽取）：运行期任何动态编译
-// （工具 call/register/unregister 重建、code_run 自我执行、orchestrate 用户钩子）
+// （工具 call/register/unregister 重建、run_js 自我执行、hooks 用户钩子）
 // 必须经由本模块编译，禁止在调用链路里散落裸 new Function。统一点：
 //   1) 强制 "use strict"；
 //   2) 仅暴露显式注入的形参（ctx / opts / agent…，绝不暴露模块作用域或全局敏感对象）；
@@ -27,7 +27,7 @@ function compileFn(code: string): (...a: any[]) => any {
   return createSandboxFn([], `return (${c});`) as (...a: any[]) => any;
 }
 
-// 编译"函数体"源码（code_run / 用户钩子：拿注入的形参直接执行）。
+// 编译"函数体"源码（run_js / 用户钩子：拿注入的形参直接执行）。
 export function compileBody(argNames: string[], code: string): (...a: any[]) => any {
   return createSandboxFn(argNames, code);
 }
@@ -39,7 +39,7 @@ export function buildToolFromDesc(desc: ToolDesc): ToolDef {
     name: desc.name,
     author: desc.author,
     description: desc.description,
-    inputSchema: desc.inputSchema,
+    parameters: desc.parameters,
     deps: desc.deps,
     riskLevel: desc.riskLevel,
     call,

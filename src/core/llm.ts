@@ -29,10 +29,17 @@ export interface ToolCallLite {
   function: { name: string; arguments: string };
 }
 
-// 请求体里的 tools 字段格式（API 包装形态）
+// 请求体里的 tools 字段格式（API 包装形态，对齐 OpenAI 工具标准）
 export interface ApiTool {
   type: 'function';
-  function: { name: string; description: string; inputSchema: Record<string, unknown> };
+  function: {
+    name: string;
+    description: string;
+    // strict 模式（structured outputs）：仅当 required 覆盖全部 properties 时为 true（由调用方动态判定，见 agent.ts）。
+    // 单用途工具（如 run_js/marked）required 列全属性 → strict:true；action 类工具 required 仅列通用必填 → strict:false（允许可选参数）。
+    strict: boolean;
+    parameters: Record<string, unknown>;
+  };
 }
 
 // 请求体：调用方（agent.engine）依据 config 构建并传入 chat。含 messages / stream / tools，以及模型参数（model /
