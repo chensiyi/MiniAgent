@@ -4,7 +4,6 @@ import { llm, type ChatMessage } from '../core/react_loop';
 import { markedTool } from '../tools/marked';
 import { REQUIRE_CODE_APPROVAL, APPROVAL_RISK_LEVEL, riskAtLeast, type AppConfig } from '../model/config';
 import { hooksTool, uninstallToolHooks } from '../tools/hooks';
-import { gmStorageTool } from '../tools/gm_storage';
 import { runJsTool } from '../tools/run_js';
 import { toolManagerTool } from '../tools/tool_manager';
 import { sessionTool } from '../tools/session';
@@ -482,7 +481,6 @@ export const executor = {
 // hooks 工具既提供 wrapHook 等底层方法，又带 call（进 LLM 日常载荷，供查看/热更新运行期钩子）。
 export const defaultTools: ToolDef[] = [
   hooksTool, // 钩子系统：注册即初始化（统一包裹核心函数），须先于其它工具注册
-  gmStorageTool,
   runJsTool,
   toolManagerTool,
   sessionTool,

@@ -2,10 +2,8 @@ import { llm, ReActLoop, genMsgId, type ChatMessage, type ToolCallLite, type Cha
 import { executor, defaultTools, extraBuiltinTools, type ToolCall, type ToolDef, b64Decode } from './core/executor';
 import { storage } from './core/storage';
 import { LEGACY } from './core/storage';
-import { ui } from './ui/ui';
 import { DEFAULT_CONFIG, SYSTEM_PROMPT, normalizeConfig, type AppConfig } from './model/config';
 import { rehydrateHooks, hooksTool } from './tools/hooks';
-import { gmStorageTool } from './tools/gm_storage';
 
 // 把流式累积的 ToolCallLite 转成 executor 的 ToolCall（参数 JSON.parse）。
 // type 显式置 'function'，与 OpenAI tool call 格式对齐。
@@ -54,8 +52,8 @@ function isFullyRequired(schema: Record<string, unknown>): boolean {
 }
 
 // 输出槽（核心契约）：引擎只写这个槽，绝不直连 UI 模块。默认 headless 空实现——
-// 核心可在无 DOM / 无 UI 环境运行；UI 挂载时把 agent.output 替换为 DOM 实现（ui.chat）。
-// append 返回气泡稳定 id（mid）；update/finalize/setToolHTML 均按 mid 寻址，不依赖可变 last 引用。
+// 核心可在无 DOM / 无 UI 环境运行；UI 由宿主环境（油猴 / 浏览器标签）作为工具挂载，
+// 把 agent.output 替换为对应环境的实现（如 DOM 渲染）。
 interface OutputSink {
   append(role: string, text: string, id?: string): string;
   update(mid: string, role: string, text: string, reasoning?: string): void;
@@ -68,8 +66,9 @@ const headlessSink: OutputSink = {
 };
 
 export const agent = {
-  // 配置：作为 storage 内的一个值（key='config'）暴露，读写均经 storage（落盘由 gm_storage hook 透明完成）。
-  // 因此 config 不再有独立持久化路径——config.ts 只保留纯数据定义（类型 / 种子值 / 辅助函数），存取统一走 storage。
+  // 配置：作为 storage 内的一个值（key='config'）暴露，读写均经 storage。
+  // 持久化由宿主环境的存储工具（油猴 gm_storage / 浏览器标签 ls_storage 等）透明完成，
+  // 它们在自身 register 时把外部存储镜像进内存 Map 并装上落盘钩子。config 只保留纯数据定义。
   get config(): AppConfig {
     return (agent.storage.get('config') as AppConfig) ?? ({ ...DEFAULT_CONFIG } as AppConfig);
   },
@@ -82,8 +81,8 @@ export const agent = {
   sessionId: '', // 当前会话 id（由 session 工具的 onRegister 生成）
   storage, // 逻辑存储层（命名空间分区），供运行时 / LLM 动态读写与编辑
   llm, executor, // 暴露给 LLM 做自编排：动态注册工具 / 直接推理
-  output: headlessSink, // 输出槽（核心契约）：引擎只写这里，不直连 UI；默认 headless 空实现，UI 挂载时替换为 DOM 实现
-  extensions: new Map<string, unknown>(), // 通用能力注册表：UI 挂载时注册 'ui'/'approval'，工具与核心经此发现能力，不硬引用 UI 形状
+  output: headlessSink, // 输出槽（核心契约）：引擎只写这里，不直连 UI；默认 headless 空实现，环境层挂载时替换
+  extensions: new Map<string, unknown>(), // 通用能力注册表：环境层挂载时注册 'ui'/'approval'，工具与核心经此发现能力，不硬引用环境形状
   tools: new Map<string, ToolDef>(), // 按名挂载的权威表（文档 §5.2）
   _engineActive: false, // 引擎是否在跑（防止并发起多个引擎）
 
@@ -236,100 +235,19 @@ export type Agent = typeof agent;
 // === 钩子安装现已统一收口到各工具的 register 环节（钩子功能独立，见 src/tools/hooks.ts）===
 //  - 系统提示注入：不再经钩子——engine 构建 chat 请求体时直接把 config.systemPrompt 预置为 messages[0]
 //    （单一真相源=config，改 config 即下次请求生效）。
-//  - 运行态切换（发送按钮→停止按钮）：暂注释，待 UI 独立为 tool 后由其 register 安装（见下方 TODO）。
-// 核心不再在模块体里裸 push 钩子（呼应"核心不 import UI"铁律，运行态行为由 UI 工具自挂载）。
-
-// TODO（UI 独立后）：把运行态切换钩子改为 ui 工具的 register 安装，示例：
-//   const setRunningHook = () => agent.output.setRunning(true, agent.chatStop);
-//   installHook('sendMessage', 'before', setRunningHook, { id: 'sys-running-toggle', name: '运行态切换', toolName: 'ui', core: true });
-// （当前注释掉：避免核心直接引用 UI 形状；UI 作为 tool 挂载时自行接管运行态反馈）
+//  - 运行态切换（发送按钮→停止按钮）：由宿主环境的 UI 工具在 register 时安装（核心不硬引用 UI 形状）。
+// 核心只暴露 headless 输出槽（agent.output）；UI 等环境能力由宿主环境经工具挂载，核心与其解耦。
 
 // 基本初始化（进工作循环前的一次性 bootstrap，属架构铁律允许的顶层副作用）：
-// ① 读取扁平 config（缺失则迁回旧 default:config）并种子默认配置（落盘为扁平 config）；
-// ③ 绑定 agent 引用；④ 注册默认工具（→ 各 onRegister，含 session 落盘安装）；
+// ① 读取扁平 config（缺失则迁回旧 default:config）并种子默认配置；
+// ② 注册核心基础设施（hooks）；③ 绑定 agent 引用；④ 注册默认工具（→ 各 onRegister）；
 // ⑤ 重建持久化的自编排工具（→ onRegister 重建）。
-// ---- UI 作为 tool（§11：核心可无 UI 运行；UI 是工具清单里一个可禁用/启用的 tool）----
-// register：挂载聊天界面 + 接管输出槽/渲染/确认闸；unregister：卸载 DOM + 还原 headless。
-// 关闭界面 = 在 ⚙ 工具清单禁用 ui 工具（经确认闸、可逆），核心照常 headless 运行；
-// 持久化走 config.disabledTools（init 已剔除黑名单）。重新启用 = register 重新挂载。
-function whenDomReady(): Promise<void> {
-  return new Promise((resolve) => {
-    if (document.readyState !== 'loading') return resolve();
-    document.addEventListener('DOMContentLoaded', () => resolve(), { once: true });
-  });
-}
-
-// 持久化的最小启动器：UI 被禁用后的"重新启用"入口（独立于已被卸载的 UI 本身，保证可逆、humane）。
-let launcherEl: HTMLElement | null = null;
-function ensureLauncher(): HTMLElement {
-  if (launcherEl) return launcherEl;
-  const css =
-    '#miniagent-launcher{position:fixed;right:14px;bottom:14px;z-index:2147483646}' +
-    '#miniagent-launcher button{padding:6px 12px;border:1px solid rgba(55,141,221,.6);border-radius:8px;' +
-    'background:rgba(55,141,221,.92);color:#fff;cursor:pointer;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,.3)}';
-  const style = document.createElement('style'); style.textContent = css;
-  (document.head ?? document.documentElement).append(style);
-  const el = document.createElement('div'); el.id = 'miniagent-launcher';
-  el.innerHTML = '<button type="button" title="启用 MiniAgent 界面">💬 启用界面</button>';
-  (el.querySelector('button') as HTMLButtonElement).onclick = () => { void executor.setEnabled('ui', true); };
-  if (document.body) document.body.append(el);
-  else document.addEventListener('DOMContentLoaded', () => document.body.append(el), { once: true });
-  launcherEl = el;
-  return el;
-}
-function showLauncher(): void { ensureLauncher().style.display = ''; }
-function hideLauncher(): void { ensureLauncher().style.display = 'none'; }
-function createLauncher(): void {
-  const el = ensureLauncher();
-  const uiUp = executor.list(true).some((t) => t.name === 'ui');
-  el.style.display = uiUp ? 'none' : '';
-}
-
-// 配置不完整时的提示文案
-const CONFIG_HINT = '⚠️ 未配置 API Key。两种设置方式：\n① 打开 Tampermonkey 仪表盘 → 本脚本 → 数值，直接编辑 `config` 键（JSON：{"apiKey":"你的Key","baseURL":"https://openrouter.ai/api/v1","model":"openrouter/free"}）；\n② 或运行命令：/gm_storage /action set /ns "" /key config /update true /value {"apiKey":"你的Key","baseURL":"https://openrouter.ai/api/v1","model":"openrouter/free"}';
-
-const uiTool: ToolDef = {
-  name: 'ui',
-  author: 'sys',
-  description: '界面工具：注册后挂载聊天界面并接管输出/渲染/确认闸；在工具清单禁用即"关闭界面"（经确认闸、可逆），核心仍 headless 运行。启用即重新挂载。',
-  parameters: {},
-  register: async (_ctx) => {
-    agent.output = ui.chat; // 输出槽接管（agent.output 默认 headless 空实现）
-    agent.extensions.set('ui', ui.chat); // UI 渲染能力（ui.chat.finalize 直接用 renderMarkdown；marked 已成为独立工具，不经此接管）
-    agent.extensions.set('approval', ui.requestApproval); // 确认闸经此接入（核心 requestApproval 委托）
-    await whenDomReady();
-    ui.chat.mount((text) => {
-      // 用户直接调用工具：/tool_name /param value
-      if (text.startsWith('/')) {
-        agent.output.append('user', text);
-        void handleToolCommand(text);
-        return;
-      }
-      // 配置检查：apiKey 未配置时提示用户通过工具命令设置
-      if (!agent.config.apiKey) {
-        agent.output.append('user', text);
-        agent.output.append('tool', CONFIG_HINT);
-        return;
-      }
-      void agent.sendMessage(text);
-    });
-    hideLauncher();
-  },
-  unregister: (_ctx) => {
-    ui.chat.unmount();
-    agent.output = headlessSink; // 还原 headless 空实现
-    agent.extensions.delete('ui');
-    agent.extensions.delete('approval');
-    showLauncher(); // 露出重新启用入口，保证可逆
-  },
-};
-
+// ---- 环境层能力（UI / 持久化存储）由宿主环境作为工具注册，核心不内置 ----
 function init(): void {
   executor.attachAgent(agent);
-  // 启动期镜像由 gm_storage.register 完成（把 GM_* 一次性读进 storage 内存 Map）；
-  // 先注册核心基础设施：hooks（捕获宿主引用）+ gm_storage（镜像 + 安装落盘钩子 storageSet/storageDelete）。
-  // 二者为持久化与引擎钩子的根基，不受黑名单约束——须先于下方写 config，确保落盘机制就绪。
-  executor.registerAll([hooksTool, gmStorageTool]);
+  // 先注册核心基础设施：hooks（捕获宿主引用）。hooks 为引擎钩子根基，不受黑名单约束，
+  // 须先于下方写 config（确保钩子机制就绪）。
+  executor.registerAll([hooksTool]);
   // 读取扁平 config（优先）；缺失则惰性迁回旧 default:config（兼容历史数据）
   let raw = storage.get<Partial<AppConfig>>('config');
   if (!raw) {
@@ -339,7 +257,7 @@ function init(): void {
   const cfg = normalizeConfig(raw);
   // 系统提示种子：首次运行 / 历史存档无 systemPrompt → 用源码种子 SYSTEM_PROMPT
   if (cfg.systemPrompt === undefined) cfg.systemPrompt = SYSTEM_PROMPT;
-  agent.config = cfg; // 经 gm_storage 落盘钩子写 GM（无需显式 storage.set）
+  agent.config = cfg;
   // 一次性迁移：旧 default 命名空间下其余键（sessions）迁回扁平键
   for (const legacy of Object.values(LEGACY)) {
     if (legacy.key === LEGACY.CONFIG.key) continue; // config 已在上合并
@@ -347,10 +265,9 @@ function init(): void {
     if (v !== undefined) { storage.set(legacy.key, v); storage.del(legacy.ns, legacy.key); }
   }
   const disabled = new Set(cfg.disabledTools ?? []);
-  extraBuiltinTools.push(uiTool); // UI 以 tool 形态加入内置清单（register/unregister 接管挂载/卸载）
   // 注册其余默认工具（排除已注册的核心工具），剔除黑名单（文档 §3/§5.2）
   const restTools = [...defaultTools, ...extraBuiltinTools].filter(
-    (t) => !disabled.has(t.name) && t.name !== 'hooks' && t.name !== 'gm_storage',
+    (t) => !disabled.has(t.name) && t.name !== 'hooks',
   );
   executor.registerAll(restTools); // 拓扑序注册默认工具（已剔除黑名单）
   executor.rehydrateTools(); // 重建启用的自编排工具（拓扑序）
@@ -407,8 +324,9 @@ function parseToolCommand(text: string): { name: string; args: Record<string, un
   return { name, args };
 }
 
-// 执行工具命令（绕过 LLM）：解析 → executor.run → 显示结果
-async function handleToolCommand(text: string): Promise<void> {
+// 执行工具命令（绕过 LLM）：解析 → executor.run → 显示结果。
+// 导出供宿主环境层（油猴 UI / 浏览器标签）在用户输入 '/' 命令时调用。
+export async function handleToolCommand(text: string): Promise<void> {
   const parsed = parseToolCommand(text);
   if (!parsed) { agent.output.append('tool', '⚠️ 无法解析命令'); return; }
   const exists = executor.list(true).some((t) => t.name === parsed.name);
@@ -424,19 +342,4 @@ async function handleToolCommand(text: string): Promise<void> {
   } else {
     agent.output.update(tmid, 'tool', `⚙ ${parsed.name}: ${obs}`);
   }
-}
-
-// UI 已作为 tool 由 agent.init() 注册（默认启用）：其 register 挂载界面、unregister 卸载并还原 headless。
-// 此处仅启动持久化的最小启动器（UI 被禁用后的"重新启用"入口，保证可逆、humane）。
-createLauncher();
-
-// 暴露全局单例（标准用户脚本空间：沙箱内 globalThis，便于运行时 / LLM 动态编辑）
-(globalThis as unknown as { agent: typeof agent }).agent = agent;
-
-// 仅 dev 分支额外挂到 unsafeWindow，使 DevTools 控制台可直接访问（补偿 userscript 沙箱隔离）；
-// 发布分支（main/master 等）一律不挂，避免与页面主世界互相影响。
-declare const __BUILD_BRANCH__: string;
-if (__BUILD_BRANCH__ === 'dev') {
-  const uw = (globalThis as unknown as { unsafeWindow?: typeof globalThis }).unsafeWindow;
-  if (uw) (uw as Record<string, unknown>).agent = agent;
 }
