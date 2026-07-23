@@ -44,7 +44,7 @@ export default defineConfig({
         match: ['*://*/*'], // 注入范围（后续脚本管理可控）
         noframes: true, // 仅注入顶层文档：一个标签页可能内嵌多个 iframe，避免脚本在子 frame 内重复实例化
         grant: [
-          'GM_addStyle', 'GM_setValue', 'GM_getValue', 'GM_deleteValue', 'GM_listValues', 'GM_xmlhttpRequest',
+          'GM_addStyle', 'GM_setValue', 'GM_getValue', 'GM_deleteValue', 'GM_listValues',
           // 仅 dev 分支授予 unsafeWindow：发布分支不挂页面主世界，保持标准用户脚本空间
           ...(isDevBranch ? (['unsafeWindow'] as const) : []),
         ],

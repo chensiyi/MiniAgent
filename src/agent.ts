@@ -326,8 +326,8 @@ const uiTool: ToolDef = {
 
 function init(): void {
   executor.attachAgent(agent);
-  storage.load(); // 启动期把 GM_* 镜像进内存（幂等；须在任意 storage 读写前）
-  // 先注册核心基础设施：hooks（捕获宿主引用）+ gm_storage（安装落盘钩子 storageSet/storageDelete）。
+  // 启动期镜像由 gm_storage.register 完成（把 GM_* 一次性读进 storage 内存 Map）；
+  // 先注册核心基础设施：hooks（捕获宿主引用）+ gm_storage（镜像 + 安装落盘钩子 storageSet/storageDelete）。
   // 二者为持久化与引擎钩子的根基，不受黑名单约束——须先于下方写 config，确保落盘机制就绪。
   executor.registerAll([hooksTool, gmStorageTool]);
   // 读取扁平 config（优先）；缺失则惰性迁回旧 default:config（兼容历史数据）

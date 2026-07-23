@@ -1,4 +1,3 @@
-import { GM_getValue, GM_listValues } from '$';
 import type { ToolDesc } from './executor';
 
 // 存储键集中定义（单一真相源），与逻辑存储层同处此文件（keys 本就只服务于 storage，故合并于此）。
@@ -39,10 +38,11 @@ export const LEGACY = {
 } as const;
 
 // ============================================================
-// 内存对象级别 storage：Map<string, any> + CRUD。
-// 落盘（持久化到 GM_*）由 gm_storage 工具经 hook（storageSet/storageDelete 的 before 钩子）
-// 透明提供——本文件不含任何 GM_* 写入逻辑，仅提供启动期把 GM_* 镜像进内存的 load()。
-// 调用方照常使用 get/set/del/keys，无需关心环境（落盘由 gm_storage 自动完成）。
+// 内存对象级别 storage：Map<string, any> + CRUD。纯内存、与环境无关
+// （不引入任何 GM_* / 浏览器 API）。
+// 持久化由环境层工具（油猴 gm_storage、浏览器标签 ls_storage 等）透明完成：它们在自身
+// register 时把外部存储一次性镜像进本 Map，并装上 storageSet/storageDelete 的 before 钩子
+// 把写回落到外部存储。调用方照常使用 get/set/del/keys，无需关心环境。
 // ============================================================
 
 const NS_SEP = ':';
@@ -72,23 +72,6 @@ export function resolveDel(nsOrKey: string, key?: string): string {
 
 class Storage {
   private mem = new Map<string, unknown>();
-  private loaded = false;
-
-  // 启动期把 GM_* 一次性镜像进内存（幂等：重复调用安全）。
-  // 须在任意 storage 读/写前调用——agent.init 与 gm_storage.register 都会调用，确保注册顺序无关。
-  load(): void {
-    if (this.loaded) return;
-    for (const k of GM_listValues()) {
-      const raw = GM_getValue<string>(k, undefined as unknown as string);
-      if (raw === undefined || raw === null) continue;
-      try {
-        this.mem.set(k, JSON.parse(raw));
-      } catch {
-        this.mem.set(k, raw);
-      }
-    }
-    this.loaded = true;
-  }
 
   // 读取：内存优先；缺失返回 fallback。
   // 1 参 = 仅 key（ns 默认 ''，扁平键，如 config）；2 参 = (ns, key)（命名空间键）。

@@ -149,26 +149,13 @@ export function resolveLibUrls(spec: string): string[] {
     'https://cdnjs.cloudflare.com/ajax/libs/' + s,
   ]; // 默认外国 CDN 链
 }
-// 单个 URL 加载：优先页面原生 fetch（jsDelivr 开启 CORS，跨域 GET 无需 @connect 授权，规避 GM_xmlhttpRequest 被拦），
-// 失败再退回 GM_xmlhttpRequest。返回源码文本。
-function loadLibText(url: string): Promise<string> {
-  const g = globalThis as any;
-  const viaXhr = () => new Promise<string>((resolve, reject) => {
-    const gmx = g.GM_xmlhttpRequest;
-    if (typeof gmx !== 'function') { reject(new Error('GM_xmlhttpRequest 不可用（脚本未授予该权限）')); return; }
-    gmx({
-      method: 'GET',
-      url,
-      onload: (r: any) => (r.status >= 200 && r.status < 300 ? resolve(r.responseText) : reject(new Error('HTTP ' + r.status))),
-      onerror: () => reject(new Error('网络错误（无法访问 CDN）')),
-    });
-  });
-  if (typeof g.fetch === 'function') {
-    return g.fetch(url, { redirect: 'follow' })
-      .then((res: any) => (res.ok ? res.text() : Promise.reject(new Error('HTTP ' + res.status))))
-      .catch(() => viaXhr());
-  }
-  return viaXhr();
+// 直接原生 fetch 加载外部依赖库源码（CDN 开启 CORS，跨域 GET 无需 @connect 授权）。
+// 不同运行环境的 fetch 均由宿主提供（油猴沙箱 / 浏览器标签均暴露原生 fetch）；
+// 如需替换传输层，由环境层经依赖注入提供，本文件不绑定任何 GM_* API。
+async function loadLibText(url: string): Promise<string> {
+  const res = await fetch(url, { redirect: 'follow' });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  return await res.text();
 }
 // urls 为兜底链，依次尝试（每源优先 fetch 后 GM_xmlhttpRequest），任一成功即返回；全部失败 reject。
 export function fetchLibText(urls: string[]): Promise<string> {

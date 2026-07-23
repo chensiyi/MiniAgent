@@ -1,16 +1,19 @@
 import type { ToolDef } from '../core/executor';
 import { executor } from '../core/executor';
 import { storage, NS, OVERVIEW_NS, resolveSet, resolveDel } from '../core/storage';
-import { GM_setValue, GM_deleteValue } from '$';
+import { GM_setValue, GM_deleteValue, GM_listValues, GM_getValue } from '$';
 import { installHook, uninstallToolHooks } from './hooks';
+
+// 模块级幂等标志：GM_* → 内存 Map 镜像只需做一次（register 可能被多次调用）。
+let mirrored = false;
 
 // 1) 统一的持久存储管理（整合原 storage_get/set/list/del）
 //    action 区分操作：get=读取 / set=写入 / list=列出 / del=删除。
 //    删除为破坏性操作，仅 del 动作经 requestApproval 确认闸（其余动作无摩擦）。
 //
 // 2) 落盘能力（核心职责）：storage 本身是「内存 Map + CRUD」，不含任何 GM_* 写入；
-//    本工具在 register 时包裹 storage.set / storage.del 并装上 GM 落盘 before 钩子，
-//    使一切 storage 写操作透明落盘——其它工具只管读 storage，无需关心运行环境。
+//    本工具在 register 时把 GM_* 一次性镜像进内存 Map，并包裹 storage.set / storage.del
+//    装上 GM 落盘 before 钩子，使一切 storage 写操作透明落盘——其它工具只管读 storage，无需关心运行环境。
 //    before 阶段落盘：若 GM 写入抛错（如配额超限），base（内存写入）被跳过，原方法不执行
 //    （hooks 契约：before 钩子抛错 → 不执行 base，见 hooks.ts wrapHook）。
 export const gmStorageTool: ToolDef = {
@@ -45,7 +48,19 @@ export const gmStorageTool: ToolDef = {
   },
   // 注册 = 安装落盘机制：确保内存镜像就绪 + 包裹 storage.set/del + 装 GM 落盘 before 钩子。
   register(ctx): void {
-    storage.load(); // 内存镜像（幂等；init 也可能先调过）
+    // 启动期把 GM_* 一次性镜像进内存 Map（幂等；纯内存 Storage 不含 load，由环境层在此完成）。
+    if (!mirrored) {
+      for (const k of GM_listValues()) {
+        const raw = GM_getValue<string>(k, undefined as unknown as string);
+        if (raw === undefined || raw === null) continue;
+        try {
+          storage.set('', k, JSON.parse(raw));
+        } catch {
+          storage.set('', k, raw);
+        }
+      }
+      mirrored = true;
+    }
     // 落盘钩子（before 阶段）：先写 GM，再执行 base（内存写入）。
     // installHook 内部会懒包裹 storage.set / storage.del（首次挂钩时自动 wrapHook 并就地替换回 storage 实例）。
     // 落盘失败（GM 抛错）→ before 抛错 → base 被跳过（见 hooks 契约）。

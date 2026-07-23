@@ -1,4 +1,3 @@
-import gmFetch from '@sec-ant/gm-fetch';
 
 // ============ 类型（保持与 agent.engine 契约一致） ============
 export type ChatRole = 'user' | 'assistant' | 'system' | 'tool';
@@ -183,7 +182,7 @@ export const llm = {
       tools: Array.isArray((params as Record<string, unknown>).tools) ? (params.tools as unknown[]).length : 0,
     });
 
-    const resp: any = await gmFetch(url, {
+    const resp: any = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
