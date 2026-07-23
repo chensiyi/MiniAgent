@@ -24,6 +24,12 @@ import type { RegisterCtx, AgentLike, ExecutorLike } from '../core/executor';
 // - 返回值严格跟随 base：async→Promise、sync→原值、生成器→返回生成器（仅 before 钩子）。
 // - thisArg：透传给 fn.apply(thisArg, args)；支持包时立即传（自动包裹时传宿主对象），也支持声明后迟绑（wrapped.__thisArg = ctx）。
 // - __hooked：标记已包裹，供懒包裹幂等判断（避免重复包裹）。
+//
+// ★ 异常契约（落盘等关键场景依赖此语义）：
+//   before 钩子链中任一钩子抛错 → 直接中断、base（原方法）不再执行，错误向上传播。
+//   例：gm_storage 在 storageSet.before 装了 GM 落盘钩子——若 GM 写入抛错（如配额超限），
+//   则 config.set 等原本的内存写入被跳过（"落盘失败即不写"），保证内存与落盘不出现半吊子状态。
+//   after 钩子抛错不影响 base 结果（base 已执行并 return），仅错误向上传播。
 export type HookOpts = { args: any[]; result: any };
 export type HookFn = (opts: HookOpts) => void | Promise<void>;
 
@@ -164,9 +170,10 @@ export function resolveHookTarget(
     case 'engine': return agent ? { host: agent, prop: 'engine' } : null;
     case 'run': return exec ? { host: exec, prop: 'run' } : null;
     case 'requestApproval': return exec ? { host: exec, prop: 'requestApproval' } : null;
-    case 'chat': return { host: llm, prop: 'chat' };
-    case 'storageSet': return { host: storage, prop: 'set' };
-    default: return null;
+  case 'chat': return { host: llm, prop: 'chat' };
+  case 'storageSet': return { host: storage, prop: 'set' };
+  case 'storageDelete': return { host: storage, prop: 'del' };
+  default: return null;
   }
 }
 
@@ -175,7 +182,7 @@ export function listHookedTargetNames(): string[] {
   return Array.from(new Set([...wrapedFns.values()].map((r) => r.name)));
 }
 
-// 解析并返回某目标当前的「可 hook 包裹函数」（供 orchestrate.view 读取 beforeExe/afterExe）；
+// 解析并返回某目标当前的「可 hook 包裹函数」（供 hooks.view 读取 beforeExe/afterExe）；
 // 目标从未被包裹则返回 null。单一来源，替代原 executor.resolveTarget。
 export function getHookedTarget(
   name: string,
@@ -211,7 +218,7 @@ function detach(rec: HookRec): void {
 
 export interface InstallHookOpts {
   id?: string; // 稳定 id（core 钩子应固定，便于幂等/辨识）；缺省自动生成
-  name?: string; // 可读名（orchestrate.view 显示）
+  name?: string; // 可读名（hooks.view 显示）
   toolName?: string; // 调用方工具名（登记到 byTool，卸载时清理）
   core?: boolean; // true=系统钩子（__coreHook）；false=用户钩子（__userHook）
   agentRef?: AgentLike; // 覆盖模块级 _agent（用于 installHook 早于 hooks.register 的边界场景）
@@ -267,7 +274,7 @@ export function installHook(
   return marked;
 }
 
-// 按 id 卸载：摘除运行期 + 清持久化（供 orchestrate.removeHook 用户动作）。
+// 按 id 卸载：摘除运行期 + 清持久化（供 hooks.removeHook 用户动作）。
 export function uninstallHookById(id: string): boolean {
   const rec = byId.get(id);
   if (!rec) return false;
@@ -320,7 +327,7 @@ export function restoreAllWrapped(): void {
 }
 
 // 重建用户钩子：读 hooks 命名空间全部描述符 → 编译 → installHook 挂接（登记到注册表，便于 removeHook / 卸载清理）。
-// installHook 按 desc.target 名解析并懒包裹，故 orchestrate 无需预设 target 清单。
+// installHook 按 desc.target 名解析并懒包裹，故 hooks 的 call 无需预设 target 清单。
 // executor 经 agentRef.executor 注入（避免本模块运行期 import executor，保持无循环依赖）。
 export function rehydrateHooks(agentRef: AgentLike): void {
   for (const id of storage.keys(NS.HOOKS)) {
@@ -328,11 +335,11 @@ export function rehydrateHooks(agentRef: AgentLike): void {
     if (!desc || !desc.code) continue;
     try {
       const wrapped = compileHook(desc.code, desc.name, agentRef);
-      // installHook 按名解析 + 懒包裹 + 登记（toolName='orchestrate'，便于 removeHook 按 id/名移除、卸载编排时一次性清理）
+      // installHook 按名解析 + 懒包裹 + 登记（toolName='hooks'，便于 removeHook 按 id/名移除、卸载时一次性清理）
       installHook(desc.target, (desc.phase === 'after' ? 'after' : 'before'), wrapped as HookFn, {
         id: desc.id,
         name: desc.name,
-        toolName: 'orchestrate',
+        toolName: 'hooks',
         core: false,
         agentRef,
         execRef: agentRef.executor,
@@ -351,8 +358,32 @@ export const hooksTool: ToolDef & { wrapHook: typeof wrapHook } = {
   name: 'hooks',
   author: 'sys',
   description:
-    '钩子系统（内置工具）：提供 wrapHook 方法，把普通函数包成可挂 before/after 钩子的函数；集中管理钩子的安装/卸载（installHook / uninstallHookById / uninstallHookByName / uninstallToolHooks / restoreAllWrapped）。包裹是懒的：首次给某目标挂钩时自动 wrapHook 并就地替换回宿主（维护 wrapedFns）。关闭本工具时 restoreAllWrapped 把全部被包裹函数还原为原始过程，不留悬挂钩子。各工具在 register 环节经 installHook 挂接系统钩子（如 session 落盘）。',
-  inputSchema: {},
+    '钩子系统（内置工具）：提供 wrapHook 方法，把普通函数包成可挂 before/after 钩子的函数；集中管理钩子的安装/卸载（installHook / uninstallHookById / uninstallHookByName / uninstallToolHooks / restoreAllWrapped）。包裹是懒的：首次给某目标挂钩时自动 wrapHook 并就地替换回宿主（维护 wrapedFns）。关闭本工具时 restoreAllWrapped 把全部被包裹函数还原为原始过程，不留悬挂钩子。各工具在 register 环节经 installHook 挂接系统钩子（如 session 落盘）。' +
+    '同时作为用户/LLM 界面，提供 action：view（查看实时编排快照：各钩子目标 sendMessage/engine/run/chat/requestApproval/storageSet/storageDelete 的运行期钩子清单（含 name 与 id）+ 工具清单 + 引擎（endpoint 的 model/baseURL））/ addHook（热挂接用户钩子，需传 name/target/phase/code；code 为钩子体，签名 (opts, agent, storage, executor, console)，可经 opts.args 改写请求体（chat.before 里改 opts.args[0].messages/.tools/.model/温度等即可在请求发出前编辑完整 ChatRequestBody））/ removeHook（移除用户钩子，需传 hookId 或 name；按 name 移除所有同名用户钩子）。addHook/removeHook 执行前均弹确认框。',
+  parameters: {
+    type: 'object',
+    properties: {
+      action: {
+        type: 'string',
+        enum: ['view', 'addHook', 'removeHook'],
+        description: 'view=查看快照(默认)；addHook=挂接用户钩子；removeHook=移除用户钩子',
+      },
+      name: { type: 'string', description: 'addHook 时钩子显示名；removeHook 时按名移除（移除所有同名用户钩子）。与 hookId 二选一' },
+      target: {
+        type: 'string',
+        enum: ['sendMessage', 'engine', 'run', 'chat', 'requestApproval', 'storageSet', 'storageDelete'],
+        description: 'addHook 时挂接到哪个钩子目标（storageSet=storage.set 前落盘；storageDelete=storage.del 前清落盘）',
+      },
+      phase: { type: 'string', enum: ['before', 'after'], description: 'addHook 时 before/after 阶段（默认 before）' },
+      code: {
+        type: 'string',
+        description: 'addHook 时的钩子体源码。会被包成 (opts, agent, storage, executor, console) => void：可通过改写 opts.args 影响行为（如 chat.before 里改 opts.args[0].messages / .tools / .model / 温度等，即可在请求发出前编辑完整请求体 ChatRequestBody）；agent/storage/executor/console 为运行时上下文。示例："console.log(opts.args);"。',
+      },
+      hookId: { type: 'string', description: 'removeHook 时目标钩子 id（与 name 二选一）' },
+    },
+    required: ['action'],
+    additionalProperties: false,
+  },
   // 对外提供 wrapHook 方法（用户要求：钩子能力以工具方法形态暴露）
   wrapHook,
   // 注册 = 初始化：仅捕获宿主引用，不预包裹任何函数。包裹延后到 installHook（首次挂钩时自动发生）。
@@ -367,5 +398,81 @@ export const hooksTool: ToolDef & { wrapHook: typeof wrapHook } = {
   unregister(_ctx: RegisterCtx): void {
     restoreAllWrapped();
     console.log('[MiniAgent] 钩子系统已关闭，已还原全部被包裹函数');
+  },
+  // 用户/LLM 界面：view 快照 + addHook/removeHook（原 orchestrate 工具的 call，已并入本工具）。
+  // 不 import executor：经 ctx.executor 取 list/requestApproval，保持本模块无循环依赖。
+  call: async (args, ctx) => {
+    const action = String(args.action ?? 'view');
+    if (action === 'view') {
+      const hooksSnap: Record<string, { before: { name: string; id: string | null }[]; after: { name: string; id: string | null }[] }> = {};
+      for (const t of listHookedTargetNames()) {
+        const fn = getHookedTarget(t, ctx.agent, ctx.executor);
+        // 懒包裹下，某些目标可能从未被挂钩（仍是原始函数，无 beforeExe/afterExe）→ 视为空列表，不报错。
+        const hooked = fn && (fn as unknown as { __hooked?: boolean }).__hooked ? fn : null;
+        // 每个钩子带 name + id（user 钩子有 id，core 钩子也有稳定 id + 可读名）——便于编排查看与按名/按 id 排序
+        const describe = (f: any): { name: string; id: string | null } => {
+          if (f.__userHook) return { name: String(f.__name ?? 'userHook'), id: (f.__hookId as string) ?? null };
+          if (f.__coreHook) return { name: String(f.__name ?? 'system'), id: (f.__hookId as string) ?? null };
+          return { name: '(core)', id: null };
+        };
+        hooksSnap[t] = {
+          before: hooked ? hooked.beforeExe.map(describe) : [],
+          after: hooked ? hooked.afterExe.map(describe) : [],
+        };
+      }
+      const cfg = ctx.agent.config;
+      return JSON.stringify(
+        {
+          hooks: hooksSnap,
+          tools: ctx.executor.list(true).map((t) => ({ name: t.name, author: t.author, hasCall: typeof t.call === 'function' })),
+          engine: {
+            endpoint: { model: cfg.model, baseURL: cfg.baseURL },
+          },
+        },
+        null,
+        2,
+      );
+    }
+    if (action === 'addHook') {
+      const codeStr = String(args.code ?? '');
+      const ok = await ctx.executor.requestApproval({ name: 'hooks.addHook', riskLevel: 'high', code: codeStr }, ctx.agent);
+      if (!ok) return '已取消';
+      const target = String(args.target ?? '');
+      if (!resolveHookTarget(target, ctx.agent, ctx.executor)) return `未知 target: ${args.target}`;
+      const phase = String(args.phase ?? 'before');
+      if (phase !== 'before' && phase !== 'after') return 'phase 必须为 before/after';
+      const name = String(args.name ?? 'userHook');
+      const id = 'h-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+      let wrapped: ((opts: any) => void) & Record<string, unknown>;
+      try {
+        wrapped = compileHook(codeStr, name, ctx.agent);
+      } catch (e) {
+        return `钩子代码编译失败: ${e instanceof Error ? e.message : String(e)}`;
+      }
+      // installHook 按名解析 + 懒包裹 + 登记（toolName='hooks'，便于 removeHook / 卸载时一次性清理）+ 持久化
+      installHook(target, (phase === 'after' ? 'after' : 'before'), wrapped as HookFn, {
+        id,
+        name,
+        toolName: 'hooks',
+        core: false,
+        agentRef: ctx.agent,
+        execRef: ctx.executor,
+      });
+      storage.set(NS.HOOKS, id, { id, name, target, phase, code: codeStr });
+      return `已挂接用户钩子 ${name} → ${target}.${phase}（id=${id}），刷新不丢`;
+    }
+    if (action === 'removeHook') {
+      const id = String(args.hookId ?? '');
+      const name = String(args.name ?? '');
+      if (!id && !name) return 'removeHook 需提供 hookId 或 name（按 name 移除所有同名用户钩子）';
+      const ok = await ctx.executor.requestApproval({ name: 'hooks.removeHook', riskLevel: 'high', code: id || name }, ctx.agent);
+      if (!ok) return '已取消';
+      // 回收：经集中式钩子 API 按 id / 名移除（同时清持久化；core 钩子经 __userHook 过滤不在此移除）
+      let removed = 0;
+      if (id) removed += uninstallHookById(id) ? 1 : 0;
+      else if (name) removed += uninstallHookByName(name);
+      return removed ? `已移除 ${removed} 个钩子（id=${id || '-'} name=${name || '-'}）` : `未找到匹配钩子（id=${id || '-'} name=${name || '-'}）`;
+    }
+    return `未知 action: ${action}（支持 view/addHook/removeHook）`;
   },
 };

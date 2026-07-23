@@ -1,4 +1,4 @@
-import { GM_getValue, GM_setValue, GM_deleteValue, GM_listValues } from '$';
+import { GM_getValue, GM_listValues } from '$';
 import type { ToolDesc } from './executor';
 
 // 存储键集中定义（单一真相源），与逻辑存储层同处此文件（keys 本就只服务于 storage，故合并于此）。
@@ -38,63 +38,101 @@ export const LEGACY = {
   SESSIONS: { ns: 'default', key: 'sessions' },
 } as const;
 
-// 逻辑存储层：薄封装 Tampermonkey GM_*，自动 JSON 序列化/反序列化。
-// 存储按"命名空间"分区：realKey 空 ns → 扁平键（如 config），非空 → `${ns}:${key}`（如 default:xxx / session:<id> / tools:<name>）。
-// set 由 hooks 工具在注册时经 wrapHook 包裹（保留扩展钩子能力，运行期带 beforeExe/afterExe）；get/del/keys 为基础操作无需钩子。
+// ============================================================
+// 内存对象级别 storage：Map<string, any> + CRUD。
+// 落盘（持久化到 GM_*）由 gm_storage 工具经 hook（storageSet/storageDelete 的 before 钩子）
+// 透明提供——本文件不含任何 GM_* 写入逻辑，仅提供启动期把 GM_* 镜像进内存的 load()。
+// 调用方照常使用 get/set/del/keys，无需关心环境（落盘由 gm_storage 自动完成）。
+// ============================================================
 
 const NS_SEP = ':';
 
 // 空 ns → 扁平键（无前缀），如 config；非空 → `${ns}:${key}`（如 default:xxx / tools:name）。
-// 这样 config 存为扁平键 `config`，用户在 Tampermonkey 数值里一眼可见、直接编辑（2026-07-21，回退到最初无 ns 设计）。
+// 这样 config 存为扁平键 `config`，用户在 Tampermonkey 数值里一眼可见、直接编辑。
 function realKey(ns: string, key: string): string {
   return ns ? `${ns}${NS_SEP}${key}` : key;
 }
 
-export const storage = {
-  // 读取：JSON 反序列化；非 JSON 原样返回；缺失返回 fallback。
-  // ns 省略时默认 ''（扁平键，如 config）：storage.get('config')。
-  // 1 参 = 仅 key（ns 默认 ''）；2/3 参 = (ns, key[, fallback])（兼容既有 storage.get(ns, key)）。
+// 由 storage.set 的原始入参推导最终「键 + 值」（兼容 ns/key 双参与扁平单键两种调用）。
+// 既供 storage.set 内部使用，也供 gm_storage 的落盘 before 钩子复用——保证内存键与落盘键完全一致。
+export function resolveSet(
+  nsOrKey: string,
+  keyOrValue: unknown,
+  value?: unknown,
+): { key: string; val: unknown } {
+  // 2 参 = (key, value) 扁平键；3 参 = (ns, key, value) 命名空间键。
+  if (arguments.length <= 2 || value === undefined) return { key: nsOrKey, val: keyOrValue };
+  return { key: realKey(nsOrKey, String(keyOrValue)), val: value };
+}
+
+// 由 storage.del 的原始入参推导最终「键」（兼容 ns/key 双参与扁平单键）。
+export function resolveDel(nsOrKey: string, key?: string): string {
+  return arguments.length <= 1 || key === undefined ? nsOrKey : realKey(nsOrKey, String(key));
+}
+
+class Storage {
+  private mem = new Map<string, unknown>();
+  private loaded = false;
+
+  // 启动期把 GM_* 一次性镜像进内存（幂等：重复调用安全）。
+  // 须在任意 storage 读/写前调用——agent.init 与 gm_storage.register 都会调用，确保注册顺序无关。
+  load(): void {
+    if (this.loaded) return;
+    for (const k of GM_listValues()) {
+      const raw = GM_getValue<string>(k, undefined as unknown as string);
+      if (raw === undefined || raw === null) continue;
+      try {
+        this.mem.set(k, JSON.parse(raw));
+      } catch {
+        this.mem.set(k, raw);
+      }
+    }
+    this.loaded = true;
+  }
+
+  // 读取：内存优先；缺失返回 fallback。
+  // 1 参 = 仅 key（ns 默认 ''，扁平键，如 config）；2 参 = (ns, key)（命名空间键）。
   get<T = unknown>(nsOrKey: string, keyOrFallback?: T | string, fallback?: T): T {
-    let ns: string, key: string, fb: T | undefined;
-    if (arguments.length === 1) { ns = ''; key = nsOrKey; fb = keyOrFallback as T; }
-    else { ns = nsOrKey; key = keyOrFallback as string; fb = fallback; }
-    const raw = GM_getValue<string>(realKey(ns, key), undefined as unknown as string);
-    if (raw === undefined || raw === null) return fb as T;
-    try {
-      return JSON.parse(raw) as T;
-    } catch {
-      return raw as unknown as T;
-    }
-  },
-
-  // 写入：ns 省略时默认 ''（扁平键，如 config）：storage.set('config', agent.config)。
-  // string 原样存，其余 JSON 序列化。afterExe 广播 storage:changed（由 hooks 工具 wrapHook 包裹后生效，替换本属性即可）。
-  set(nsOrKey: string, keyOrValue: unknown, value?: unknown): void {
-    if (arguments.length === 2) {
-      GM_setValue(nsOrKey, typeof keyOrValue === 'string' ? keyOrValue : JSON.stringify(keyOrValue));
+    let key: string;
+    let fb: T | undefined;
+    if (arguments.length === 1) {
+      key = nsOrKey;
+      fb = keyOrFallback as T;
     } else {
-      GM_setValue(realKey(nsOrKey, keyOrValue as string), typeof value === 'string' ? value : JSON.stringify(value));
+      key = realKey(nsOrKey, keyOrFallback as string);
+      fb = fallback;
     }
-  },
+    return this.mem.has(key) ? (this.mem.get(key) as T) : (fb as T);
+  }
 
-  // 删除：ns 省略时默认 ''（扁平键，如 config）：storage.del('config')。
+  // 写入：仅写内存。落盘由 gm_storage 的 before 钩子负责（不在本文件）。
+  // 2 参 = (key, value) 扁平键；3 参 = (ns, key, value) 命名空间键。
+  set(nsOrKey: string, keyOrValue: unknown, value?: unknown): void {
+    const { key, val } = resolveSet(nsOrKey, keyOrValue, value);
+    this.mem.set(key, val);
+  }
+
+  // 删除：仅删内存。落盘清除由 gm_storage 的 before 钩子负责。
+  // 1 参 = 仅 key（扁平键）；2 参 = (ns, key) 命名空间键。
   del(nsOrKey: string, key?: string): void {
-    if (arguments.length === 1) GM_deleteValue(nsOrKey);
-    else GM_deleteValue(realKey(nsOrKey, key as string));
-  },
+    this.mem.delete(resolveDel(nsOrKey, key));
+  }
 
-  // 列出某命名空间下的子键（去前缀）；不传 ns 则返回全部原始键（含前缀）
+  // 列出子键：不传 ns 返回全部原始键（含前缀）；传 ns 去前缀返回该分区子键。
   keys(ns?: string): string[] {
-    const all: string[] = GM_listValues();
+    const all = [...this.mem.keys()];
     if (!ns) return all;
     const prefix = `${ns}${NS_SEP}`;
     return all.filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length));
-  },
+  }
 
   // 列出 tools 命名空间下全部工具描述符（系统真相源），供 boot 重建 / chat_ui 开关使用
   listToolDefs(): ToolDesc[] {
-    return storage.keys(NS.TOOLS)
-      .map((k) => storage.get<ToolDesc>('tools', k))
+    return this.keys(NS.TOOLS)
+      .map((k) => this.get<ToolDesc>('tools', k))
       .filter((d): d is ToolDesc => !!d);
-  },
-};
+  }
+}
+
+// 全局唯一内存存储实例，供 agent / ctx / 工具共用（同一引用，落盘钩子对其方法生效）。
+export const storage = new Storage();

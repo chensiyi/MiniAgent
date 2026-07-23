@@ -4,9 +4,11 @@ import { storage } from './core/storage';
 import { LEGACY } from './core/storage';
 import { ui } from './ui/ui';
 import { DEFAULT_CONFIG, SYSTEM_PROMPT, normalizeConfig, type AppConfig } from './model/config';
-import { rehydrateHooks } from './tools/hooks';
+import { rehydrateHooks, hooksTool } from './tools/hooks';
+import { gmStorageTool } from './tools/gm_storage';
 
-// 把流式累积的 ToolCallLite 转成 executor 的 ToolCall（参数 JSON.parse）
+// 把流式累积的 ToolCallLite 转成 executor 的 ToolCall（参数 JSON.parse）。
+// type 显式置 'function'，与 OpenAI tool call 格式对齐。
 function toToolCall(t: ToolCallLite): ToolCall {
   let args: Record<string, unknown> = {};
   try {
@@ -14,7 +16,41 @@ function toToolCall(t: ToolCallLite): ToolCall {
   } catch {
     args = { raw: t.function.arguments };
   }
-  return { id: t.id, name: t.function.name, args };
+  return { id: t.id, type: 'function', name: t.function.name, args };
+}
+
+// strict 模式合规归一（仅在请求边界做，非 tool 内部校验）：
+// 确保 object schema 带 additionalProperties:false，且 required 含全部属性键（OpenAI structured outputs 硬要求）。
+// 让内置与自编排（tool_manager 创建）工具的 schema 都能安全进入 strict:true，不依赖作者手写合规。
+function ensureStrictSchema(s: unknown): Record<string, unknown> {
+  if (!s || typeof s !== 'object') return s as Record<string, unknown>;
+  const obj = s as Record<string, unknown>;
+  if (obj.type === 'object' && obj.properties && typeof obj.properties === 'object') {
+    const props = obj.properties as Record<string, unknown>;
+    const keys = Object.keys(props);
+    // 仅保证 additionalProperties:false（防模型把未知字段塞进 args）；
+    // required 尊重工具自身声明——不强制补全为全部属性（action 类工具只列通用必填，
+    // 其余参数按 action 由 tool.call 内部自查；详见 docs/ARCHITECTURE.md §8）。
+    // strict 是否启用由调用方依"required 是否覆盖全部 properties"动态判定。
+    const out: Record<string, unknown> = {
+      ...obj,
+      additionalProperties: false,
+      properties: Object.fromEntries(keys.map((k) => [k, ensureStrictSchema(props[k])])),
+    };
+    if (!Array.isArray(obj.required)) out.required = [];
+    return out;
+  }
+  return obj;
+}
+
+// strict 模式（OpenAI structured outputs）要求 required 覆盖全部 properties。
+// 故：仅当工具的 required 已列全属性时才发 strict:true；否则发 strict:false（允许可选参数，
+// 由 tool.call 内部按 action 自查）。additionalProperties:false 始终经 ensureStrictSchema 保证。
+function isFullyRequired(schema: Record<string, unknown>): boolean {
+  const props = schema.properties as Record<string, unknown> | undefined;
+  const keys = props ? Object.keys(props) : [];
+  const req = (schema.required as string[] | undefined) ?? [];
+  return keys.length > 0 && keys.every((k) => req.includes(k));
 }
 
 // 输出槽（核心契约）：引擎只写这个槽，绝不直连 UI 模块。默认 headless 空实现——
@@ -31,7 +67,14 @@ const headlessSink: OutputSink = {
 };
 
 export const agent = {
-  config: { ...DEFAULT_CONFIG } as AppConfig, // 运行期配置单一真相源（内存）；持久化：storage.set('config', agent.config)
+  // 配置：作为 storage 内的一个值（key='config'）暴露，读写均经 storage（落盘由 gm_storage hook 透明完成）。
+  // 因此 config 不再有独立持久化路径——config.ts 只保留纯数据定义（类型 / 种子值 / 辅助函数），存取统一走 storage。
+  get config(): AppConfig {
+    return (agent.storage.get('config') as AppConfig) ?? ({ ...DEFAULT_CONFIG } as AppConfig);
+  },
+  set config(v: AppConfig) {
+    agent.storage.set('config', v);
+  },
   messages: [] as ChatMessage[], // 已提交给 LLM 的全量上下文
   messageQueue: [] as ChatMessage[], // 待提交的用户/推理轮
   toolCallQueue: [] as ToolCall[], // 待执行的工具调用
@@ -64,11 +107,20 @@ export const agent = {
         agent.messages.push(msg);
         agent.messageQueue.shift();
 
-        // 可用工具（仅非 hidden 工具进 LLM 载荷）；映射为 API 的 ApiTool 形态
-        const tools = executor.list().map((t) => ({
-          type: 'function' as const,
-          function: { name: t.name, description: t.description, inputSchema: t.inputSchema },
-        }));
+        // 可用工具（仅非 hidden 工具进 LLM 载荷）；映射为 API 的 ApiTool 形态（严格对齐 OpenAI 工具标准）
+        const tools = executor.list().map((t) => {
+          const schema = ensureStrictSchema(t.parameters);
+          const strict = isFullyRequired(schema);
+          return {
+            type: 'function' as const,
+            function: {
+              name: t.name,
+              description: t.description,
+              strict,
+              parameters: schema,
+            },
+          };
+        });
         const cfg = agent.config;
 
         // assistant 占位气泡：流式逐字更新依赖 lastAssistantEl，必须先建
@@ -114,8 +166,6 @@ export const agent = {
         });
         if (final.toolCalls.length) {
           console.log('[MiniAgent.Agent] 🔧 工具调用', final.toolCalls.map((t) => ({ name: t.function.name, args: t.function.arguments })));
-        } else {
-          console.log('[MiniAgent.Agent] ℹ️ 本轮无工具调用');
         }
       }
     } finally {
@@ -156,7 +206,7 @@ export type Agent = typeof agent;
 
 // === 钩子安装现已统一收口到各工具的 register 环节（钩子功能独立，见 src/tools/hooks.ts）===
 //  - 系统提示注入：不再经钩子——engine 构建 chat 请求体时直接把 config.systemPrompt 预置为 messages[0]
-//    （单一真相源=config，orchestrate.update 改 config 即下次请求生效）。
+//    （单一真相源=config，改 config 即下次请求生效）。
 //  - 运行态切换（发送按钮→停止按钮）：暂注释，待 UI 独立为 tool 后由其 register 安装（见下方 TODO）。
 // 核心不再在模块体里裸 push 钩子（呼应"核心不 import UI"铁律，运行态行为由 UI 工具自挂载）。
 
@@ -213,7 +263,7 @@ const uiTool: ToolDef = {
   name: 'ui',
   author: 'sys',
   description: '界面工具：注册后挂载聊天界面并接管输出/渲染/确认闸；在工具清单禁用即"关闭界面"（经确认闸、可逆），核心仍 headless 运行。启用即重新挂载。',
-  inputSchema: {},
+  parameters: {},
   register: async (_ctx) => {
     agent.output = ui.chat; // 输出槽接管（agent.output 默认 headless 空实现）
     agent.extensions.set('ui', ui.chat); // UI 渲染能力（ui.chat.finalizeLast 直接用 renderMarkdown；marked 已成为独立工具，不经此接管）
@@ -246,6 +296,11 @@ const uiTool: ToolDef = {
 };
 
 function init(): void {
+  executor.attachAgent(agent);
+  storage.load(); // 启动期把 GM_* 镜像进内存（幂等；须在任意 storage 读写前）
+  // 先注册核心基础设施：hooks（捕获宿主引用）+ gm_storage（安装落盘钩子 storageSet/storageDelete）。
+  // 二者为持久化与引擎钩子的根基，不受黑名单约束——须先于下方写 config，确保落盘机制就绪。
+  executor.registerAll([hooksTool, gmStorageTool]);
   // 读取扁平 config（优先）；缺失则惰性迁回旧 default:config（兼容历史数据）
   let raw = storage.get<Partial<AppConfig>>('config');
   if (!raw) {
@@ -255,19 +310,20 @@ function init(): void {
   const cfg = normalizeConfig(raw);
   // 系统提示种子：首次运行 / 历史存档无 systemPrompt → 用源码种子 SYSTEM_PROMPT
   if (cfg.systemPrompt === undefined) cfg.systemPrompt = SYSTEM_PROMPT;
-  agent.config = cfg;
-  storage.set('config', agent.config); // 落盘（含迁移 / 种子结果）
+  agent.config = cfg; // 经 gm_storage 落盘钩子写 GM（无需显式 storage.set）
   // 一次性迁移：旧 default 命名空间下其余键（sessions）迁回扁平键
   for (const legacy of Object.values(LEGACY)) {
     if (legacy.key === LEGACY.CONFIG.key) continue; // config 已在上合并
     const v = storage.get(legacy.ns, legacy.key);
     if (v !== undefined) { storage.set(legacy.key, v); storage.del(legacy.ns, legacy.key); }
   }
-  executor.attachAgent(agent);
   const disabled = new Set(cfg.disabledTools ?? []);
   extraBuiltinTools.push(uiTool); // UI 以 tool 形态加入内置清单（register/unregister 接管挂载/卸载）
-  const bootList = [...defaultTools, ...extraBuiltinTools].filter((t) => !disabled.has(t.name)); // 黑名单直接移出名单（文档 §3/§5.2）
-  executor.registerAll(bootList); // 拓扑序注册默认工具（已剔除黑名单）
+  // 注册其余默认工具（排除已注册的核心工具），剔除黑名单（文档 §3/§5.2）
+  const restTools = [...defaultTools, ...extraBuiltinTools].filter(
+    (t) => !disabled.has(t.name) && t.name !== 'hooks' && t.name !== 'gm_storage',
+  );
+  executor.registerAll(restTools); // 拓扑序注册默认工具（已剔除黑名单）
   executor.rehydrateTools(); // 重建启用的自编排工具（拓扑序）
   rehydrateHooks(agent); // 重建用户钩子（热插拔，刷新不丢）
 }
@@ -330,7 +386,7 @@ async function handleToolCommand(text: string): Promise<void> {
   if (!exists) { agent.output.append('tool', `⚠️ 未找到工具：${parsed.name}`); return; }
   agent.output.append('tool', `⚙ ${parsed.name}: 执行中…`);
   const obs = await executor.run(
-    { id: 'cmd-' + Date.now().toString(36), name: parsed.name, args: parsed.args },
+    { id: 'cmd-' + Date.now().toString(36), type: 'function', name: parsed.name, args: parsed.args },
     agent,
   );
   // marked 工具返回 HTML，直接渲染；其它工具结果用 textContent 显示原始文本
