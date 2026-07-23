@@ -6,9 +6,9 @@ import {
   resolveToolDesc,
   resolveLibUrls,
   fetchLibText,
-  SYS_AUTHOR,
   b64Encode,
 } from '../core/executor';
+import { SYS_AUTHOR } from '../core/keys';
 import { NS } from '../core/storage';
 
 // ---- 工具导出（序列化）能力：从持久化/运行期描述符生成可重注册的 JS / 安装命令 ----
