@@ -10,8 +10,8 @@
 | `src/core/sandbox.ts`（新） | 迁入 `createSandboxFn` / `compileFn` / `compileBody` / `buildToolFromDesc` / `compileHook` + `SANDBOX_HEADER`。运行时仅依赖叶子 `storage`，对 `executor` 仅 `import type`（擦除后无运行期循环）。`compileHook` 改经 `agentRef.executor` 注入 executor，不再运行时引核心。 |
 | `src/core/executor.ts` | 删除上述编译器家族 + `compileHook` 定义 + `rehydrateHooks` 方法与接口声明（约 -70 行）；导入改为 `hooksTool, uninstallToolHooks`（去 `installHook`/`HookFn`），新增 `buildToolFromDesc` 从 `./sandbox` 导入。executor 不再含钩子机制代码。 |
 | `src/tools/hooks.ts` | 新增 `import { compileHook } from '../core/sandbox'`；新增导出 `rehydrateHooks(agentRef)`（读 `NS.HOOKS` 描述符 → `compileHook` 编译 → `installHook` 挂接，`execRef` 用 `agentRef.executor`）。 |
-| `src/tools/code_run.ts` | `compileBody` 改从 `../core/sandbox` 导入。 |
-| `src/tools/orchestrate.ts` | `compileHook` 改从 `../core/sandbox` 导入（保留 `executor` 从 `../core/executor`）。 |
+| `src/tools/run_js.ts` | `compileBody` 改从 `../core/sandbox` 导入（原名 `code_run.ts`，2026-07-23 改名为 `run_js`）。 |
+| `src/tools/orchestrate.ts` | **已删除（2026-07-23）**：其 `call`（view/addHook/removeHook 界面 + 审批 + 持久化）已并入 `src/tools/hooks.ts` 的 `hooksTool.call`；钩子机制原语（install/uninstall/rehydrate/wrap）本就在 `hooks.ts`。 |
 | `src/tools/tool_manager.ts` | `buildToolFromDesc` 改从 `../core/sandbox` 导入。 |
 | `src/agent.ts` | 新增 `import { rehydrateHooks } from './tools/hooks'`；调用处 `executor.rehydrateHooks(agent)` → `rehydrateHooks(agent)`。 |
 
