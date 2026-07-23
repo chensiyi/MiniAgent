@@ -7,7 +7,12 @@ export interface AppConfig {
   baseURL: string;
   systemPrompt?: string; // 系统提示单一真相源：存于扁平 config 键（经 storage.set 写入；init 用源码种子值初始化）。运行期只认此值，不回退源码常量
   disabledTools?: string[]; // 工具黑名单：boot 时直接从注册名单剔除（文档 §3/§5.2）
+  reasoningEffort?: ReasoningEffort; // 思考强度（reasoning effort）：仅推理模型（o-series / 支持 reasoning_effort 的模型）生效；非推理模型传此字段可能被忽略或报错，故默认不设置（不向 API 注入该字段）。经 agent.engine 以 OpenAI 标准字段名 `reasoning_effort` 注入请求体。
 }
+
+// 思考强度枚举（对齐 OpenAI reasoning_effort 取值）。
+// low=少思考 / medium=适中 / high=深度思考。是否生效取决于模型是否支持。
+export type ReasoningEffort = 'low' | 'medium' | 'high';
 
 export const DEFAULT_CONFIG: AppConfig = {
   // theme: 'light',

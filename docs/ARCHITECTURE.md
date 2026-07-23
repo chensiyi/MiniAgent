@@ -203,13 +203,13 @@ UI 不是核心的一部分，而是一个**可插拔组件**（概念上的 too
 ### 11.1 三个解耦点
 
 1. **输出槽 `agent.output`（核心契约）**
-   - 核心定义 `OutputSink` 接口（`append` / `updateLast` / `finalizeLast` / `setToolHTML` / `setRunning`），并提供 **headless 默认空实现**。
+   - 核心定义 `OutputSink` 接口（`append` 返回气泡稳定 id `mid` / `update(mid,…)` / `finalize(mid,…)` / `setToolHTML(mid,…)` / `setRunning`），并提供 **headless 默认空实现**。`append` 返回 `mid`，后续 `update`/`finalize`/`setToolHTML` 均按 `mid` 寻址（`bubblesById` 字典），**不依赖可变 lastXxxEl 引用**——工具调用后进入下一轮也能精确命中目标气泡。
    - 引擎、`sendMessage`、`handleToolCommand` **只写 `agent.output`**，绝不直连 `ui.chat`。
    - UI 挂载时把 `agent.output` 替换为 DOM 实现（`ui.chat`）；卸载即回退 headless 空实现。
 
 2. **通用能力注册表 `agent.extensions`（`Map<string, unknown>`）**
    - 核心不硬引用 UI 的形状。UI 挂载时注册两项能力：
-     - `'ui'` → `ui.chat`：UI 渲染能力（`ui.chat.finalizeLast` 直接用 `src/tools/marked.ts` 的 `renderMarkdown` 渲染助手消息 / 思考）；`marked` 已作为**独立工具文件**常驻 `src/tools/`（见 §12.5），**不接管** UI 渲染（无 `setMarkdownRenderer`/`resetMarkdownRenderer`），工具离线 / 卸载不影响默认渲染。
+     - `'ui'` → `ui.chat`：UI 渲染能力（`ui.chat.finalize` 直接用 `src/tools/marked.ts` 的 `renderMarkdown` 渲染助手消息 / 思考；按 `mid` 寻址气泡）；`marked` 已作为**独立工具文件**常驻 `src/tools/`（见 §12.5），**不接管** UI 渲染（无 `setMarkdownRenderer`/`resetMarkdownRenderer`），工具离线 / 卸载不影响默认渲染。
      - `'approval'` → `ui.requestApproval`：人类确认闸（HITL）。
    - 工具 / 核心经 `agent.extensions` **发现**能力，而非 `import` 或硬编码 `agent.ui`。
 
@@ -252,8 +252,9 @@ UI 已实现为内置 tool（`name: 'ui'`）：由 `agent.ts` 定义 `uiTool`（
 - "替换过程"= 编排阶段把基础函数用 `withHooks` 重新包一层并赋值（组合级替换，如 `agent.sendMessage = withHooks(base)`），而非 per-call skip。base 只留最小核心流程，插入/替换全交钩子。
 - 所有"过程"方法（`sendMessage` / `llm.chat` / `llm.streamChat` / `executor.run`）都用 withHooks 包裹，全系统统一可 hook。
 
-### 12.2 llm 模块（`src/core/llm.ts`）
-- 无状态对象，只持 `config` 属性 + 标准方法 `chat` / `streamChat`，均为 HookedFunction 实例；历史在 `agent.messages`，llm 不持有。
+### 12.2 模型与循环模块（`src/core/react_loop.ts`）
+- 模块承载两层：底层 `llm` 流式对象（`chat`）+ ReAct 循环封装 `ReActLoop`（取代旧 `runReAct`，更贴合"循环"语义）。
+- `llm` 无状态对象，只持 `config` 属性 + 标准方法 `chat`（流式唯一入口，由 hooks 工具在注册时经 wrapHook 包裹）；历史在 `agent.messages`，llm 不持有。
 - 接口（2026-07-21 重构，2026-07-23 对齐 OpenAI 工具标准）：`streamChat(body: ChatRequestBody)` / `chat(body)` 直接接收**完整请求体**；`ChatRequestBody = { messages, stream?, tools?: ApiTool[], tool_choice?, model?, [k]: any }`；`ApiTool = { type:'function', function:{ name, description, strict, parameters } }`——`strict` 为布尔：仅当工具的 `required` 覆盖 `parameters` 全部属性时为 `true`（structured outputs，模型被约束到该结构）；action 类工具 `required` 仅列 `action` → `strict:false`、允许可选参数（由 `call` 内部按 action 自查）。`parameters` 即 OpenAI 标准字段名；`additionalProperties:false` 始终经 `ensureStrictSchema` 保证（防注入未知字段）。
 - 内部只从 `getConfig()` 取 `apiKey`/`baseURL`（传输层）；`body.messages` 保底空数组、`body.stream` 锁 `true`（SSE 要求）；**不再**内部拼 model/温度/合并 baseRequestBody（构建移到调用方 `agent.engine`）。
 - SSE 解析：按 `\n` 切物理行；`reasoning_content`/`reasoning` 增量累积 `reasoningContent` 并 yield `{ reasoning }`；`tool_calls` 按 `index` 累积（缺 index 时分配到下一空槽 `Object.keys(acc).length`，防多工具合并）；`usage`/`model`/`finish_reason` 末尾捕获。
@@ -293,13 +294,13 @@ UI 已实现为内置 tool（`name: 'ui'`）：由 `agent.ts` 定义 `uiTool`（
 ### 12.5 ui 模块（`src/ui/ui.ts`）+ marked 渲染（独立工具文件 `src/tools/marked.ts`）
 - v4 玻璃**方框**无圆角浅色字（不挂背景板/标题栏；`--glass:rgba(18,26,44,.52)`、`--text:#eef2ff`、品牌 `#378DDD`、风险 high 橙 `#fb923c`）；气泡区 `mask-image` 顶部渐隐。
 - **可插拔组件（概念上的 tool/adapter），核心绝不 import UI**（`agent` 装配层除外，见 §0.2）。方法（`ui.chat` / `ui.panel` / `ui.tools` / `ui.requestApproval`）：
-  - `ui.chat`: `mount/append/updateLast/setToolHTML/finalizeLast/setRunning/send/setInput/refreshAutocomplete/acceptAutocomplete`
+  - `ui.chat`: `mount/append(返回 mid)/update(mid,…)/setToolHTML(mid,…)/finalize(mid,…)/setRunning/send/setInput/refreshAutocomplete/acceptAutocomplete`
   - `ui.panel`: `toggle/setCollapsed/isCollapsed`
   - `ui.tools`: `toggle/open/close/refresh`（⚙ 面板 `allToolStates` + `setEnabled`）
   - `ui.requestApproval`: withHooks 确认闸
   - `mount()` 时把 `ui.chat` 设给 `agent.output`、向 `agent.extensions` 注册 `'ui'`(渲染)/`'approval'`(确认闸)。
 - Trusted Types 兼容：所有 `innerHTML` 赋值必须走 `setHTML(el, html)`（建一次性 `createPolicy('miniagent', {createHTML:(s)=>s})`），勿裸赋。
-- **markdown 渲染（特殊例外，2026-07-21）**：`src/tools/marked.ts` 是**独立工具文件**，不跟随 `chat_ui`（UI 解耦），理由有二：① 其源码经油猴 `@require` 注入、运行时作为隔离世界全局消费；② markdown 是 LLM 界长期基本格式，应作为基础能力常驻。它有两个出口：`renderMarkdown(src)`（ui 默认渲染器 `finalizeLast` 直接 import 使用）与 `markedTool`（注册为系统工具 `name:'marked'`，可被 LLM / 用户命令 `/marked` 调用把 markdown 渲染为 HTML）。**`marked` 不接管 UI 渲染**（无 `setMarkdownRenderer`/`resetMarkdownRenderer`），ui 始终直接用 `renderMarkdown`，工具离线 / 卸载不影响默认渲染。渲染库（marked+DOMPurify）加载见 §13.1，运行期无下载。
+- **markdown 渲染（特殊例外，2026-07-21）**：`src/tools/marked.ts` 是**独立工具文件**，不跟随 `chat_ui`（UI 解耦），理由有二：① 其源码经油猴 `@require` 注入、运行时作为隔离世界全局消费；② markdown 是 LLM 界长期基本格式，应作为基础能力常驻。它有两个出口：`renderMarkdown(src)`（ui 默认渲染器 `finalize` 直接 import 使用）与 `markedTool`（注册为系统工具 `name:'marked'`，可被 LLM / 用户命令 `/marked` 调用把 markdown 渲染为 HTML）。**`marked` 不接管 UI 渲染**（无 `setMarkdownRenderer`/`resetMarkdownRenderer`），ui 始终直接用 `renderMarkdown`，工具离线 / 卸载不影响默认渲染。渲染库（marked+DOMPurify）加载见 §13.1，运行期无下载。
 
 ### 12.6 agent 模块（`src/agent.ts`）
 - 全局单例 `globalThis.agent`；**解耦铁律**：引擎/`sendMessage`/`handleToolCommand` 只写 `agent.output`（OutputSink 契约，默认 headless 空实现），绝不直连 ui；核心经 `agent.extensions`（Map 通用能力表）发现 UI 能力，不硬引用 `agent.ui`。
@@ -311,7 +312,8 @@ UI 已实现为内置 tool（`name: 'ui'`）：由 `agent.ts` 定义 `uiTool`（
 - `parseToolCommand()` / `handleToolCommand()`：解析 `/tool /param value /flag` 语法，绕过 LLM 直接调 `executor.run`（`/` 开头→工具命令；apiKey 空→提示配置；否则正常 sendMessage）。
 
 ### 12.7 config 模块（`src/model/config.ts`）
-- **纯数据定义，无 CRUD / 无持久化**：`AppConfig`（含 `disabledTools?: string[]` 黑名单、`apiKey`/`baseURL`/`model`、`systemPrompt?`）、`DEFAULT_CONFIG`、`SYSTEM_PROMPT`、`REQUIRE_CODE_APPROVAL`、`RiskLevel`+`APPROVAL_RISK_LEVEL`+`riskAtLeast`、`normalizeConfig`（合并默认值回落）、`getSystemPrompt`。**本模块不提供任何存取方法**——config 只是 storage 内的一个值（key=`config`），存取统一走 `agent.storage.get/set('config')`（落盘由 gm_storage 钩子自动完成）。
+- **纯数据定义，无 CRUD / 无持久化**：`AppConfig`（含 `disabledTools?: string[]` 黑名单、`apiKey`/`baseURL`/`model`、`systemPrompt?`、`reasoningEffort?: ReasoningEffort` 思考强度枚举）、`DEFAULT_CONFIG`、`SYSTEM_PROMPT`、`REQUIRE_CODE_APPROVAL`、`RiskLevel`+`APPROVAL_RISK_LEVEL`+`riskAtLeast`、`ReasoningEffort`（`'low'|'medium'|'high'`）、`normalizeConfig`（合并默认值回落）、`getSystemPrompt`。**本模块不提供任何存取方法**——config 只是 storage 内的一个值（key=`config`），存取统一走 `agent.storage.get/set('config')`（落盘由 gm_storage 钩子自动完成）。
+  - 思考强度 `reasoningEffort`：仅推理模型（o-series / 支持 `reasoning_effort` 的模型）生效；非推理模型传此字段可能被忽略或报 `Unsupported parameter`，故默认**不设置**（不向 API 注入该字段）。`agent.engine` 在配置该字段时，以 OpenAI 标准字段名 `reasoning_effort` 经 `ReActLoop` 的 `extraBody` 透传合并进请求体（见 §12.6）；请求体本身为开放结构（`ChatRequestBody` 的 `[key:string]:unknown`），与此透传通道一致。
 - `agent.config` 是 agent 上的 getter/setter：getter 读 `storage.get('config')`（缺省回落 `DEFAULT_CONFIG`），setter 经 `storage.set('config', v)` 写回（触发 gm_storage 落盘钩子）。engine / ui / executor 照常经 `agent.config.xxx` 读取，无感。
 - `SYSTEM_PROMPT`：工具说明同步（gm_storage/tool_manager/hooks/session/run_js）；明确"run_js 由系统自动弹确认框，你无需文字确认，直接调用"（避免双重确认）。
 

@@ -1,6 +1,6 @@
 import type { ToolDef, AgentLike } from '../core/executor';
 import { storage, NS, FLAT, NS_FLAT } from '../core/storage';
-import type { ChatMessage } from '../core/llm';
+import type { ChatMessage } from '../core/react_loop';
 import { installHook, type HookFn } from '../tools/hooks';
 
 // ============================================================

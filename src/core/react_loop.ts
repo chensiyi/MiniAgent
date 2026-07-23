@@ -6,6 +6,8 @@ export type ChatRole = 'user' | 'assistant' | 'system' | 'tool';
 export interface ChatMessage {
   role: ChatRole;
   content: string;
+  // 稳定消息 id：气泡与调用一一对应（ReActLoop 写入 assistant 消息时对齐气泡 id）
+  id?: string;
   // 工具循环所需的元数据（OpenAI 规范）
   tool_calls?: ToolCallLite[];
   tool_call_id?: string;
@@ -20,6 +22,8 @@ export interface ChatChunk {
   reasoning?: string; // 思考链增量（reasoning_content / reasoning）
   toolCall?: { index: number; id?: string; name?: string; arguments?: string };
   done?: boolean;
+  turn?: number; // ReAct 轮次（step 索引）：调用方可据此为每一轮创建独立气泡，避免多轮内容混在同一气泡导致顺序错乱 / 互相覆盖
+  mid?: string; // 本轮助手消息 + 气泡共享的稳定 id（ReActLoop 每轮生成），做到「每个消息一个 id，气泡与消息对齐」
 }
 
 // 工具调用（已解析、参数已合并）
@@ -68,6 +72,12 @@ export interface ChatResult {
 export interface LlmDeps {
   apiKey: string;
   baseURL?: string;
+}
+
+// 稳定消息 id 生成器（时间序 + 自增序号，避免碰撞；导出供 agent 给 user 消息也打 id）
+let _msgSeq = 0;
+export function genMsgId(): string {
+  return `m${Date.now().toString(36)}${(++_msgSeq).toString(36)}`;
 }
 
 // ============ 最小 SSE 解析（吸收 openai SDK streaming.mjs 思路，零依赖） ============
@@ -164,6 +174,14 @@ export const llm = {
       stream: true,
       stream_options: (body as Record<string, unknown>).stream_options ?? { include_usage: true },
     };
+
+    // stream 开始：记录本轮请求目标（与 engine 的「LLM 返回」日志交叉对照）
+    console.log('[MiniAgent.LLM] 🌐 开始流式请求', {
+      url,
+      model: params.model,
+      messages: Array.isArray((params as Record<string, unknown>).messages) ? (params.messages as unknown[]).length : 0,
+      tools: Array.isArray((params as Record<string, unknown>).tools) ? (params.tools as unknown[]).length : 0,
+    });
 
     const resp: any = await gmFetch(url, {
       method: 'POST',
@@ -267,10 +285,10 @@ function buildResult(
   return { content, reasoningContent, toolCalls, finishReason, usage, model: modelResp };
 }
 
-// ============ ReAct 循环封装：把"chat → 执行工具 → 再 chat"收进 llm，引擎只做侵入式改造 ============
+// ============ ReAct 循环封装：把"chat → 执行工具 → 再 chat"收进本模块，引擎只做侵入式改造 ============
 // 调用方只需提供：历史 messages、可用 tools、executeTool（执行工具并返回 tool 结果消息）、onChunk（流式 UI 钩子）。
 // 内部循环：调 chat 流式 → 无 tool_calls 即结束 return；有则 executeTool → 把结果追加入 messages → 再 chat，直到 maxSteps。
-export async function* runReAct(opts: {
+export async function* ReActLoop(opts: {
   messages: ChatMessage[]; // 历史（会被原地追加 assistant / tool 消息）
   tools: ApiTool[];
   systemPrompt?: string;
@@ -279,9 +297,11 @@ export async function* runReAct(opts: {
   maxSteps?: number;
   onChunk?: (c: ChatChunk) => void; // 流式增量钩子（UI 更新等侵入逻辑）
   executeTool: (calls: ToolCallLite[]) => Promise<ChatMessage[]>; // 工具执行器：返回 tool 结果消息
+  extraBody?: Record<string, unknown>; // 厂商扩展字段透传（如 reasoning_effort 等），合并进请求体
 }): AsyncGenerator<ChatChunk, ChatResult> {
   const max = opts.maxSteps ?? 8;
   for (let step = 0; step < max; step++) {
+    const turnMid = genMsgId(); // 本轮助手消息 + 气泡共享的稳定 id（气泡与消息对齐）
     const body: ChatRequestBody = {
       model: opts.model,
       messages: [
@@ -290,16 +310,18 @@ export async function* runReAct(opts: {
       ],
       stream: true,
       ...(opts.tools.length ? { tools: opts.tools, tool_choice: 'auto' } : {}),
+      ...(opts.extraBody ?? {}),
     };
-    const result = await driveChat(body, opts.deps, opts.onChunk);
-    // 写回 assistant 消息（含 tool_calls，供下一轮工具循环保留上下文）
+    const result = await driveChat(body, opts.deps, opts.onChunk, step, turnMid);
+    // 写回 assistant 消息（含 tool_calls，供下一轮工具循环保留上下文）；id 对齐本轮气泡
     opts.messages.push({
       role: 'assistant',
       content: result.content,
+      id: turnMid,
       reasoning_content: result.reasoningContent || undefined,
       tool_calls: result.toolCalls.length ? result.toolCalls : undefined,
     });
-    opts.onChunk?.({ done: true });
+    opts.onChunk?.({ done: true, turn: step, mid: turnMid });
     if (!result.toolCalls.length) return result;
     const toolMsgs = await opts.executeTool(result.toolCalls);
     for (const m of toolMsgs) opts.messages.push(m);
@@ -308,16 +330,19 @@ export async function* runReAct(opts: {
   return { content: '', toolCalls: [], reasoningContent: undefined, finishReason: 'max_steps', usage: undefined, model: undefined };
 }
 
-// 手动驱动 chat 生成器，转发分片给 onChunk，并捕获 return 的 ChatResult（for await 会丢弃 return）
+// 手动驱动 chat 生成器，转发分片给 onChunk，并捕获 return 的 ChatResult（for await 会丢弃 return）。
+// turn/mid 透传到每个分片，供调用方按轮次（turn）创建独立气泡、并以 mid 对齐助手消息 id。
 async function driveChat(
   body: ChatRequestBody,
   deps: LlmDeps,
   onChunk?: (c: ChatChunk) => void,
+  turn?: number,
+  mid?: string,
 ): Promise<ChatResult> {
   const it = llm.chat(body, deps);
   let r = await it.next();
   while (!r.done) {
-    onChunk?.(r.value as ChatChunk);
+    onChunk?.({ ...(r.value as ChatChunk), turn, mid });
     r = await it.next();
   }
   return (r.value ?? { content: '', toolCalls: [] }) as ChatResult;

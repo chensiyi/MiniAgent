@@ -6,7 +6,7 @@ import type { ToolDef } from '../core/executor';
 // 安全：渲染输出经 DOMPurify 清洗，避免 LLM 内容带来的 XSS；
 //       marked / DOMPurify 任一不可用时，回退为转义纯文本，保证不崩。
 // 双重出口：
-//   1) renderMarkdown(src) —— UI 默认渲染器直接 import 使用（ui.finalizeLast 调它）；
+//   1) renderMarkdown(src) —— UI 默认渲染器直接 import 使用（ui.chat.finalize 调它）；
 //   2) markedTool —— 注册为系统工具（name:'marked'），可被 LLM / 用户命令 /marked 调用把 markdown 渲染成 HTML。
 //   marked 不做「接管 UI 渲染」（无 setMarkdownRenderer / resetMarkdownRenderer）；UI 直接消费 renderMarkdown，
 //   工具离线 / 卸载不影响默认渲染（run 仍走 renderMarkdown）。

@@ -1,6 +1,6 @@
 import { storage, NS } from './storage';
 import { buildToolFromDesc } from './sandbox';
-import { llm, type ChatMessage } from '../core/llm';
+import { llm, type ChatMessage } from '../core/react_loop';
 import { markedTool } from '../tools/marked';
 import { REQUIRE_CODE_APPROVAL, APPROVAL_RISK_LEVEL, riskAtLeast, type AppConfig } from '../model/config';
 import { hooksTool, uninstallToolHooks } from '../tools/hooks';

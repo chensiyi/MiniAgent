@@ -12,7 +12,7 @@
 //  - 不 import ui 等上层模块（仅经 ctx 拿到 agent/executor），保持核心解耦；仅依赖底层 storage / llm（叶子模块，存储键常量也定义在 storage.ts 内）。
 
 import { storage } from '../core/storage';
-import { llm } from '../core/llm';
+import { llm } from '../core/react_loop';
 import { NS } from '../core/storage';
 import { compileHook } from '../core/sandbox';
 import type { RegisterCtx, AgentLike, ExecutorLike } from '../core/executor';

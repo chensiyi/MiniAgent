@@ -1,4 +1,4 @@
-import { llm, runReAct, type ChatMessage, type ToolCallLite, type ChatResult } from './core/llm';
+import { llm, ReActLoop, genMsgId, type ChatMessage, type ToolCallLite, type ChatResult } from './core/react_loop';
 import { executor, defaultTools, extraBuiltinTools, type ToolCall, type ToolDef, b64Decode } from './core/executor';
 import { storage } from './core/storage';
 import { LEGACY } from './core/storage';
@@ -55,15 +55,16 @@ function isFullyRequired(schema: Record<string, unknown>): boolean {
 
 // 输出槽（核心契约）：引擎只写这个槽，绝不直连 UI 模块。默认 headless 空实现——
 // 核心可在无 DOM / 无 UI 环境运行；UI 挂载时把 agent.output 替换为 DOM 实现（ui.chat）。
+// append 返回气泡稳定 id（mid）；update/finalize/setToolHTML 均按 mid 寻址，不依赖可变 last 引用。
 interface OutputSink {
-  append(role: string, text: string): void;
-  updateLast(role: string, text: string, reasoning?: string): void;
-  finalizeLast(role: string, text: string, reasoning?: string): void;
-  setToolHTML(html: string): void;
+  append(role: string, text: string, id?: string): string;
+  update(mid: string, role: string, text: string, reasoning?: string): void;
+  finalize(mid: string, role: string, text: string, reasoning?: string): void;
+  setToolHTML(mid: string, html: string): void;
   setRunning(running: boolean, onStop?: () => void): void;
 }
 const headlessSink: OutputSink = {
-  append() {}, updateLast() {}, finalizeLast() {}, setToolHTML() {}, setRunning() {},
+  append: () => '', update() {}, finalize() {}, setToolHTML() {}, setRunning() {},
 };
 
 export const agent = {
@@ -97,13 +98,14 @@ export const agent = {
   },
 
   // 引擎：消息队列驱动（由 hooks 工具在注册时经 wrapHook 包裹，before 钩子管运行态）。
-  // ReAct 循环已收口到 llm.runReAct：agent 只在 onChunk 做流式 UI、在 executeTool 做工具执行（侵入式改造），
+  // ReAct 循环已收口到 react_loop.ReActLoop：agent 只在 onChunk 做流式 UI、在 executeTool 做工具执行（侵入式改造），
   // 不再手写 SSE 解析与"chat→工具→再chat"循环。
   engine: async function () {
     try {
       while (agent.messageQueue.length) {
         // 推进一条消息：入历史，弹出队首（user 气泡已由 sendMessage 渲染，不重复 append）
         const msg = agent.messageQueue[0];
+        if (!msg.id) msg.id = genMsgId(); // 用户消息也带稳定 id，与助手/工具消息一致
         agent.messages.push(msg);
         agent.messageQueue.shift();
 
@@ -123,29 +125,53 @@ export const agent = {
         });
         const cfg = agent.config;
 
-        // assistant 占位气泡：流式逐字更新依赖 lastAssistantEl，必须先建
-        agent.output.append('assistant', '');
-        let lastContent = '', lastReasoning = '';
+        // 按 ReAct 轮次（turn）分轮建气泡：工具调用轮与最终回答轮各占一条，
+        // DOM 顺序天然正确（A 轮 → 工具气泡 → B 轮），且各轮内容独立缓冲、互不覆盖
+        // （此前共享 lastContent 单一缓冲导致首轮被覆盖 + 顺序错乱）。
+        // 轮次切换时定稿上一轮气泡、新开本轮；气泡 id 用 ReActLoop 下发的 c.mid，与助手消息 id 对齐（每消息一个 id）。
+        let lastTurn = -1;
+        let turnMid: string | null = null;
+        let turnContent = '', turnReasoning = '';
+        const seenToolCalls: ToolCallLite[] = [];
 
-        // runReAct 收口"chat → 执行工具 → 再 chat"循环；agent 仅在 onChunk 做 UI、在 executeTool 做工具执行。
-        const it = runReAct({
+        // ReActLoop 收口"chat → 执行工具 → 再 chat"循环；agent 仅在 onChunk 做 UI、在 executeTool 做工具执行。
+        const it = ReActLoop({
           messages: agent.messages,
           tools,
           systemPrompt: cfg.systemPrompt ?? '',
           model: cfg.model,
           deps: { apiKey: cfg.apiKey, baseURL: cfg.baseURL },
+          // 思考强度：仅当配置时以 OpenAI 标准字段名 reasoning_effort 注入请求体（非推理模型不支持，故默认不注入）
+          extraBody: cfg.reasoningEffort ? { reasoning_effort: cfg.reasoningEffort } : undefined,
           onChunk: (c) => {
-            if (c.delta) { lastContent += c.delta; agent.output.updateLast('assistant', lastContent, lastReasoning); }
-            if (c.reasoning) { lastReasoning += c.reasoning; agent.output.updateLast('assistant', lastContent, lastReasoning); }
+            if (c.turn == null) return; // done 等无轮次元数据的分片忽略
+            // 轮次切换：定稿上一轮气泡（若已建），为本轮开新气泡
+            if (c.turn !== lastTurn) {
+              if (turnMid != null) {
+                // 极端兜底：定稿抛错则新建一条气泡保证可见（绝不静默丢失）
+                try { agent.output.finalize(turnMid, 'assistant', turnContent, turnReasoning || undefined); }
+                catch (e) { console.warn('[MiniAgent.Agent] finalize 异常，尝试 fallback 渲染:', e); agent.output.append('assistant', turnContent || '(渲染异常)'); }
+              }
+              // 始终经 append 创建本轮气泡（c.mid 作为显式 id，与助手消息 id 对齐）。
+              // 之前误用 c.mid ?? append() 导致：有 mid 时跳过 append→bubblesById 无此 key→后续 update 全部找不到气泡。
+              turnMid = agent.output.append('assistant', '', c.mid);
+              turnContent = '';
+              turnReasoning = '';
+              lastTurn = c.turn;
+            }
+            if (c.toolCall) seenToolCalls.push({ id: c.toolCall.id ?? '', type: 'function', function: { name: c.toolCall.name ?? '', arguments: c.toolCall.arguments ?? '' } });
+            const m = turnMid; // 收窄：轮次切换时已确保非 null
+            if (m && c.delta) { turnContent += c.delta; agent.output.update(m, 'assistant', turnContent, turnReasoning); }
+            if (m && c.reasoning) { turnReasoning += c.reasoning; agent.output.update(m, 'assistant', turnContent, turnReasoning); }
           },
           executeTool: async (calls) => {
             const msgs: ChatMessage[] = [];
             for (const call of calls) {
               const tc = toToolCall(call);
-              agent.output.append('tool', `⚙ ${tc.name}: 执行中…`);
+              const tmid = agent.output.append('tool', `⚙ ${tc.name}: 执行中…`);
               const obs = await executor.run(tc, agent);
               msgs.push({ role: 'tool', content: obs, tool_call_id: tc.id, name: tc.name } as ChatMessage);
-              agent.output.updateLast('tool', `⚙ ${tc.name}: ${obs}`);
+              agent.output.update(tmid, 'tool', `⚙ ${tc.name}: ${obs}`);
             }
             return msgs;
           },
@@ -155,17 +181,20 @@ export const agent = {
         while (!r.done) r = await it.next();
         const final = (r.value ?? { content: '', toolCalls: [] }) as ChatResult;
 
-        agent.output.finalizeLast('assistant', lastContent, lastReasoning || undefined);
+        // 定稿最后一轮气泡（找不到/脱离 DOM 仅告警，不静默指向错误气泡）；极端兜底保证可见。
+        if (turnMid != null) {
+          try { agent.output.finalize(turnMid, 'assistant', turnContent, turnReasoning || undefined); }
+          catch (e) { console.warn('[MiniAgent.Agent] finalize 异常，尝试 fallback 渲染:', e); agent.output.append('assistant', turnContent || '(渲染异常)'); }
+        }
 
-        // 日志：LLM 返回摘要（与 llm.ts 的"完成"日志呼应，便于交叉对照）
+        // 日志：LLM 返回摘要（与 react_loop.ts 的"完成"日志呼应，便于交叉对照）
         console.log('[MiniAgent.Agent] 📬 LLM 返回', {
-          contentLen: lastContent.length,
-          reasoningLen: lastReasoning.length,
-          toolCalls: final.toolCalls.length,
-          toolCallNames: final.toolCalls.map((t) => t.function.name),
+          turns: lastTurn + 1,
+          contentLen: final.content.length,
+          seenToolCalls: seenToolCalls.length,
         });
-        if (final.toolCalls.length) {
-          console.log('[MiniAgent.Agent] 🔧 工具调用', final.toolCalls.map((t) => ({ name: t.function.name, args: t.function.arguments })));
+        if (seenToolCalls.length) {
+          console.log('[MiniAgent.Agent] 🔧 工具调用', seenToolCalls.map((t) => ({ name: t.function.name, args: t.function.arguments })));
         }
       }
     } finally {
@@ -266,7 +295,7 @@ const uiTool: ToolDef = {
   parameters: {},
   register: async (_ctx) => {
     agent.output = ui.chat; // 输出槽接管（agent.output 默认 headless 空实现）
-    agent.extensions.set('ui', ui.chat); // UI 渲染能力（ui.chat.finalizeLast 直接用 renderMarkdown；marked 已成为独立工具，不经此接管）
+    agent.extensions.set('ui', ui.chat); // UI 渲染能力（ui.chat.finalize 直接用 renderMarkdown；marked 已成为独立工具，不经此接管）
     agent.extensions.set('approval', ui.requestApproval); // 确认闸经此接入（核心 requestApproval 委托）
     await whenDomReady();
     ui.chat.mount((text) => {
@@ -384,16 +413,16 @@ async function handleToolCommand(text: string): Promise<void> {
   if (!parsed) { agent.output.append('tool', '⚠️ 无法解析命令'); return; }
   const exists = executor.list(true).some((t) => t.name === parsed.name);
   if (!exists) { agent.output.append('tool', `⚠️ 未找到工具：${parsed.name}`); return; }
-  agent.output.append('tool', `⚙ ${parsed.name}: 执行中…`);
+  const tmid = agent.output.append('tool', `⚙ ${parsed.name}: 执行中…`);
   const obs = await executor.run(
     { id: 'cmd-' + Date.now().toString(36), type: 'function', name: parsed.name, args: parsed.args },
     agent,
   );
   // marked 工具返回 HTML，直接渲染；其它工具结果用 textContent 显示原始文本
   if (parsed.name === 'marked') {
-    agent.output.setToolHTML(`⚙ ${parsed.name}: ${String(obs)}`);
+    agent.output.setToolHTML(tmid, `⚙ ${parsed.name}: ${String(obs)}`);
   } else {
-    agent.output.updateLast('tool', `⚙ ${parsed.name}: ${obs}`);
+    agent.output.update(tmid, 'tool', `⚙ ${parsed.name}: ${obs}`);
   }
 }
 

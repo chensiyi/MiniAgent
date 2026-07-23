@@ -93,7 +93,10 @@ function renderToolsPanel(panel: HTMLElement): void {
 }
 
 let root: HTMLElement, bubbles: HTMLElement, input: HTMLInputElement, sendBtn: HTMLButtonElement, stopBtn: HTMLButtonElement;
-let lastAssistantEl: HTMLElement | null = null, lastToolEl: HTMLElement | null = null;
+// 气泡稳定索引：mid → DOM 元素。替代脆弱的 lastAssistantEl/lastToolEl 可变引用
+// （工具调用后进入下一轮时，旧引用可能指向已失效/错误的气泡，导致更新/定稿静默丢失）。
+const bubblesById = new Map<string, HTMLElement>();
+let bubbleSeq = 0; // 无显式 id 时自增生成气泡 id
 let acEl: HTMLElement | null = null;
 let acItems: { text: string; hint: string }[] = [];
 let acIndex = -1;
@@ -231,32 +234,38 @@ export const ui = {
       input = null as unknown as HTMLInputElement;
       sendBtn = null as unknown as HTMLButtonElement;
       stopBtn = null as unknown as HTMLButtonElement;
-      lastAssistantEl = null;
-      lastToolEl = null;
+      bubblesById.clear();
       acEl = null;
       onSendRef = null;
       toolsPanelEl = null;
       toggleBtnEl = null;
     },
 
-    append(role: string, text: string): void {
+    // 追加一条气泡，返回其稳定 id（mid）。同一调用（助手回复/工具执行）全程用该 id 寻址，
+    // 不再依赖 lastXxxEl 可变引用——工具调用后进入下一轮时也能精确命中目标气泡。
+    // 传入 id 时优先用传入值（engine 把气泡 id 与 assistant 消息 id 对齐，做到「每个消息一个 id」）。
+    append(role: string, text: string, id?: string): string {
       const el = document.createElement('div'); el.className = `ma-bubble ${role}`;
+      const mid = id ?? `b${(++bubbleSeq).toString(36)}`;
+      el.dataset.mid = mid;
       if (role === 'assistant') {
         // 预建 think 折叠块（隐藏，有 reasoning 时显示）+ 正文容器
         setHTML(el, '<details class="ma-think" style="display:none"><summary>💭 思考过程</summary><div class="ma-think-body"></div></details><div class="ma-md-content"></div>');
         const c = el.querySelector('.ma-md-content') as HTMLElement; if (c) c.textContent = text;
-        lastAssistantEl = el;
       } else {
         el.textContent = text;
-        if (role === 'tool') lastToolEl = el;
       }
       bubbles.append(el); bubbles.scrollTop = bubbles.scrollHeight;
+      bubblesById.set(mid, el);
+      return mid;
     },
 
-    // 流式更新最近一条气泡：assistant 逐字文本+思考 / tool 进度→结果（流式用 textContent 快）
-    updateLast(role: string, text: string, reasoning?: string): void {
-      const el = role === 'tool' ? lastToolEl : role === 'assistant' ? lastAssistantEl : null;
-      if (!el) return;
+    // 流式更新指定 id 的气泡：assistant 逐字文本+思考 / tool 进度→结果（流式用 textContent 快）。
+    // 按 mid 寻址，命中失败仅告警，绝不静默指向错误气泡。
+    update(mid: string, role: string, text: string, reasoning?: string): void {
+      const el = bubblesById.get(mid) ?? null;
+      if (!el) { console.warn('[MiniAgent.UI] update 跳过：找不到气泡', { mid, role, textLen: text?.length }); return; }
+      if (!el.isConnected) { console.warn('[MiniAgent.UI] update 跳过：气泡已脱离 DOM', { mid, role }); return; }
       if (role === 'assistant') {
         const c = el.querySelector('.ma-md-content') as HTMLElement; if (c) c.textContent = text;
         if (reasoning != null) {
@@ -267,29 +276,31 @@ export const ui = {
       bubbles.scrollTop = bubbles.scrollHeight;
     },
 
-    // 把最近一条 tool 气泡渲染为 HTML（经 DOMPurify 清洗）。用于 marked 等返回 HTML 的工具结果。
-    setToolHTML(html: string): void {
-      if (!lastToolEl) return;
+    // 把指定 id 的 tool 气泡渲染为 HTML（经 DOMPurify 清洗）。用于 marked 等返回 HTML 的工具结果。
+    setToolHTML(mid: string, html: string): void {
+      const el = bubblesById.get(mid) ?? null;
+      if (!el) return;
       if (typeof DOMPurify !== 'undefined' && typeof DOMPurify.sanitize === 'function') {
-        setHTML(lastToolEl, DOMPurify.sanitize(html));
+        setHTML(el, DOMPurify.sanitize(html));
       } else {
-        lastToolEl.textContent = html; // 清洗库不可用时回退纯文本，避免 XSS
+        el.textContent = html; // 清洗库不可用时回退纯文本，避免 XSS
       }
       bubbles.scrollTop = bubbles.scrollHeight;
     },
 
-    // 流结束：assistant 正文 + think 正文做 markdown 渲染（一次性，避免流式频繁 setHTML）。
+    // 流结束：指定 id 的 assistant 气泡正文 + think 正文做 markdown 渲染（一次性，避免流式频繁 setHTML）。
     // 渲染走默认 renderMarkdown（依赖全局 marked，由 @require 注入；marked 工具不接管 UI 渲染）。
-    finalizeLast(role: string, text: string, reasoning?: string): void {
-      const el = role === 'assistant' ? lastAssistantEl : null;
-      if (!el) return;
+    finalize(mid: string, role: string, text: string, reasoning?: string): void {
+      const el = bubblesById.get(mid) ?? null;
+      if (!el) { console.warn('[MiniAgent.UI] finalize 跳过：找不到气泡', { mid, role, textLen: text?.length, reasoningLen: reasoning?.length }); return; }
+      if (!el.isConnected) { console.warn('[MiniAgent.UI] finalize 跳过：气泡已脱离 DOM', { mid }); return; }
       const c = el.querySelector('.ma-md-content') as HTMLElement;
       if (c) {
         // 正文为空但有过思考（如工具调用轮次助手仅发 tool_calls）：给占位提示，避免主区空白
         if (!text || !text.trim()) {
           c.textContent = reasoning ? '(模型已思考，本轮未返回正文)' : '(空响应)';
         } else {
-          setHTML(c, renderMarkdown(text));
+          try { setHTML(c, renderMarkdown(text)); } catch (e) { console.error('[MiniAgent.UI] renderMarkdown 异常:', e); c.textContent = text; }
         }
       }
       const think = el.querySelector('.ma-think') as HTMLElement;
