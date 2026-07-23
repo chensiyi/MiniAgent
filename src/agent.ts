@@ -54,7 +54,8 @@ function isFullyRequired(schema: Record<string, unknown>): boolean {
 // 输出槽（核心契约）：引擎只写这个槽，绝不直连 UI 模块。默认 headless 空实现——
 // 核心可在无 DOM / 无 UI 环境运行；UI 由宿主环境（油猴 / 浏览器标签）作为工具挂载，
 // 把 agent.output 替换为对应环境的实现（如 DOM 渲染）。
-interface OutputSink {
+// 导出供环境层（油猴 / 浏览器标签）的 UI 实现复用（basement 库构建后随 MiniAgent 全局暴露）。
+export interface OutputSink {
   append(role: string, text: string, id?: string): string;
   update(mid: string, role: string, text: string, reasoning?: string): void;
   finalize(mid: string, role: string, text: string, reasoning?: string): void;
@@ -343,3 +344,14 @@ export async function handleToolCommand(text: string): Promise<void> {
     agent.output.update(tmid, 'tool', `⚙ ${parsed.name}: ${obs}`);
   }
 }
+
+// ============================================================
+// 环境层契约（油猴 / 浏览器标签分支经 @require 引入本 IIFE 全局 MiniAgent 后使用）
+// —— basement 只产出核心，环境层（GM_* 存储、DOM UI、localStorage 等）由各分支作为
+// 薄壳胶水挂载。以下为胶水所需的最小公开面。
+// ============================================================
+export { executor };
+export { installHook, uninstallToolHooks } from './tools/hooks';
+export { renderMarkdown } from './tools/marked';
+export type { ToolDef, RegisterCtx, RunCtx } from './core/executor';
+export type { AppConfig } from './model/config';
