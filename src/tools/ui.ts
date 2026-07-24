@@ -444,10 +444,16 @@ export const uiTool: ToolDef = {
     agent.extensions.set('approval', ui.requestApproval); // 确认闸经此接入（核心 requestApproval 委托）
     await whenDomReady();
     ui.chat.mount((text) => {
+      // 发送期间按钮在「发送 ↔ 停止」间切换；停止按钮经 agent.chatStop 中断在途请求。
+      // 开始时切「停止」并绑定中断，结束由 basement engine 的 finally 复位（setRunning(false)）。
+      const run = (fn: () => Promise<void>): void => {
+        ui.chat.setRunning(true, () => agent.chatStop());
+        fn().finally(() => ui.chat.setRunning(false));
+      };
       // 用户直接调用工具：/tool_name /param value
       if (text.startsWith('/')) {
         agent.output.append('user', text);
-        void handleToolCommand(text);
+        run(() => handleToolCommand(text));
         return;
       }
       // 配置检查：apiKey 未配置时提示用户通过工具命令设置
@@ -456,7 +462,7 @@ export const uiTool: ToolDef = {
         agent.output.append('tool', CONFIG_HINT);
         return;
       }
-      void agent.sendMessage(text);
+      run(() => agent.sendMessage(text));
     });
     hideLauncher();
   },
