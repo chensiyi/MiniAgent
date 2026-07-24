@@ -265,7 +265,23 @@ function init(): void {
     const v = storage.get(legacy.ns, legacy.key);
     if (v !== undefined) { storage.set(legacy.key, v); storage.del(legacy.ns, legacy.key); }
   }
-  const disabled = new Set(cfg.disabledTools ?? []);
+  // 注意：以下「存储相关启动」（按 disabledTools 注册默认工具、重建自编排工具与用户钩子）
+  // 不在 init() 内执行——因为 init() 在 IIFE 加载即自动跑，此时环境层（油猴 gm_storage /
+  // 浏览器标签 ls_storage）尚未把外部存储镜像进内存 Map，存储为空会导致重建为空、黑名单未应用。
+  // 改由环境层在「镜像完外部存储」后显式调用 boot() 驱动（见 src/tools/gm_storage.ts 等）。
+}
+init();
+
+// 存储相关启动：须在外部存储（GM_* / localStorage）镜像进内存 Map 之后由环境层调用。
+// ① 按 config.disabledTools 过滤并注册默认/内置工具；② 重建启用的自编排工具；
+// ③ 重建用户钩子；④ 补回系统提示默认（GM_* 镜像若不含 systemPrompt，避免被覆盖丢弃）。
+// 因 rehydrateHooks 非幂等（重复跑会装重复钩子），本函数须且只须由环境层调用一次。
+export function boot(): void {
+  // 系统提示默认：镜像后若 config 无 systemPrompt，补回源码种子（经 setter 落盘到外部存储）
+  if (agent.config.systemPrompt === undefined) {
+    agent.config = { ...agent.config, systemPrompt: SYSTEM_PROMPT };
+  }
+  const disabled = new Set(agent.config.disabledTools ?? []);
   // 注册其余默认工具（排除已注册的核心工具），剔除黑名单（文档 §3/§5.2）
   const restTools = [...defaultTools, ...extraBuiltinTools].filter(
     (t) => !disabled.has(t.name) && t.name !== 'hooks',
@@ -274,7 +290,6 @@ function init(): void {
   executor.rehydrateTools(); // 重建启用的自编排工具（拓扑序）
   rehydrateHooks(agent); // 重建用户钩子（热插拔，刷新不丢）
 }
-init();
 
 // ---- 用户直接调用工具：/tool_name /param value /flag ----
 
