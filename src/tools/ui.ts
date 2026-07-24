@@ -384,3 +384,90 @@ export const ui = {
 };
 
 // 迟绑 thisArg（requestApproval 体内 this 指向 ui）已移至 hooks 工具的 register 统一处理（如需要）。
+
+// ---- 以下为 UI 工具与启动器（原 src/agent.ts 内联部分，随 UI 一并归入 tools，使其成为标准 ToolDef）----
+
+// 无 UI 时的空输出槽（UI 工具 unregister 时还原 headless）
+const headlessSink: OutputSink = {
+  append: () => '', update() {}, finalize() {}, setToolHTML() {}, setRunning() {},
+};
+
+// 配置不完整时的提示文案
+const CONFIG_HINT = '⚠️ 未配置 API Key。两种设置方式：\n① 打开 Tampermonkey 仪表盘 → 本脚本 → 数值，直接编辑 `config` 键（JSON：{"apiKey":"你的Key","baseURL":"https://openrouter.ai/api/v1","model":"openrouter/free"}）；\n② 或运行命令：/gm_storage /action set /ns "" /key config /update true /value {"apiKey":"你的Key","baseURL":"https://openrouter.ai/api/v1","model":"openrouter/free"}';
+
+// 等待 DOM 就绪（UI 挂载用）
+function whenDomReady(): Promise<void> {
+  return new Promise((resolve) => {
+    if (document.readyState !== 'loading') return resolve();
+    document.addEventListener('DOMContentLoaded', () => resolve(), { once: true });
+  });
+}
+
+// 持久化的最小启动器：UI 被禁用后的"重新启用"入口（独立于已被卸载的 UI 本身，保证可逆、humane）
+let launcherEl: HTMLElement | null = null;
+function ensureLauncher(): HTMLElement {
+  if (launcherEl) return launcherEl;
+  const css =
+    '#miniagent-launcher{position:fixed;right:14px;bottom:14px;z-index:2147483646}' +
+    '#miniagent-launcher button{padding:6px 12px;border:1px solid rgba(55,141,221,.6);border-radius:8px;' +
+    'background:rgba(55,141,221,.92);color:#fff;cursor:pointer;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,.3)}';
+  const style = document.createElement('style'); style.textContent = css;
+  (document.head ?? document.documentElement).append(style);
+  const el = document.createElement('div'); el.id = 'miniagent-launcher';
+  el.innerHTML = '<button type="button" title="启用 MiniAgent 界面">💬 启用界面</button>';
+  (el.querySelector('button') as HTMLButtonElement).onclick = () => { void MiniAgent.executor.setEnabled('ui', true); };
+  if (document.body) document.body.append(el);
+  else document.addEventListener('DOMContentLoaded', () => document.body.append(el), { once: true });
+  launcherEl = el;
+  return el;
+}
+function showLauncher(): void { ensureLauncher().style.display = ''; }
+function hideLauncher(): void { ensureLauncher().style.display = 'none'; }
+function createLauncher(): void {
+  const el = ensureLauncher();
+  const uiUp = agent.tools.has('ui');
+  el.style.display = uiUp ? 'none' : '';
+}
+
+// 消费经 @require 引入的 basement 全局（运行时已自动 init：注册核心默认工具、读 config）
+const { agent, handleToolCommand } = MiniAgent;
+
+// UI 工具：注册后挂载聊天界面并接管输出/渲染/确认闸；禁用即"关闭界面"（经确认闸、可逆），核心仍 headless 运行。启用即重新挂载。
+export const uiTool: ToolDef = {
+  name: 'ui',
+  author: 'sys',
+  description: '界面工具：注册后挂载聊天界面并接管输出/渲染/确认闸；在工具清单禁用即"关闭界面"（经确认闸、可逆），核心仍 headless 运行。启用即重新挂载。',
+  parameters: {},
+  register: async (_ctx) => {
+    agent.output = ui.chat; // 输出槽接管（agent.output 默认 headless 空实现）
+    agent.extensions.set('ui', ui.chat); // UI 渲染能力（marked 已成为独立工具，不经此接管）
+    agent.extensions.set('approval', ui.requestApproval); // 确认闸经此接入（核心 requestApproval 委托）
+    await whenDomReady();
+    ui.chat.mount((text) => {
+      // 用户直接调用工具：/tool_name /param value
+      if (text.startsWith('/')) {
+        agent.output.append('user', text);
+        void handleToolCommand(text);
+        return;
+      }
+      // 配置检查：apiKey 未配置时提示用户通过工具命令设置
+      if (!agent.config.apiKey) {
+        agent.output.append('user', text);
+        agent.output.append('tool', CONFIG_HINT);
+        return;
+      }
+      void agent.sendMessage(text);
+    });
+    hideLauncher();
+  },
+  unregister: (_ctx) => {
+    ui.chat.unmount();
+    agent.output = headlessSink; // 还原 headless 空实现
+    agent.extensions.delete('ui');
+    agent.extensions.delete('approval');
+    showLauncher(); // 露出重新启用入口，保证可逆
+  },
+};
+
+// 模块加载即确保启动器存在：ui 被禁用时显"启用界面"入口；ui 启用时由 register 调 hideLauncher 隐藏
+createLauncher();
