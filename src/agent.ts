@@ -351,7 +351,5 @@ export async function handleToolCommand(text: string): Promise<void> {
 // 薄壳胶水挂载。以下为胶水所需的最小公开面。
 // ============================================================
 export { executor };
-export { installHook, uninstallToolHooks } from './tools/hooks';
-export { renderMarkdown } from './tools/marked';
 export type { ToolDef, RegisterCtx, RunCtx } from './core/executor';
 export type { AppConfig } from './model/config';

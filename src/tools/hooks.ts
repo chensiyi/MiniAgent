@@ -354,7 +354,7 @@ export function rehydrateHooks(agentRef: AgentLike): void {
 // ===== 钩子工具：注册即初始化（捕获宿主引用）；挂接由 installHook 懒包裹 =====
 import type { ToolDef } from '../core/executor';
 
-export const hooksTool: ToolDef & { wrapHook: typeof wrapHook } = {
+export const hooksTool: ToolDef & { wrapHook: typeof wrapHook; installHook: typeof installHook; uninstallToolHooks: typeof uninstallToolHooks } = {
   name: 'hooks',
   author: 'sys',
   description:
@@ -384,8 +384,11 @@ export const hooksTool: ToolDef & { wrapHook: typeof wrapHook } = {
     required: ['action'],
     additionalProperties: false,
   },
-  // 对外提供 wrapHook 方法（用户要求：钩子能力以工具方法形态暴露）
+  // 对外提供钩子能力方法（用户要求：钩子能力以工具方法形态暴露，统一经 agent.tools.get('hooks') 调用，
+  // 避免散装全局声明）：wrapHook 包裹函数；installHook/uninstallToolHooks 安装/卸载钩子。
   wrapHook,
+  installHook,
+  uninstallToolHooks,
   // 注册 = 初始化：仅捕获宿主引用，不预包裹任何函数。包裹延后到 installHook（首次挂钩时自动发生）。
   // 约定：hooks 必须在其它会 installHook 的工具之前注册（defaultTools 首位），确保 _agent/_exec 已就绪；
   // 调用方亦可经 opts.agentRef/execRef 显式传入，进一步解耦启动顺序。
