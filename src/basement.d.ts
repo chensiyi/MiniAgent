@@ -73,17 +73,23 @@ declare global {
   };
 
   // ---- basement IIFE 全局（@require 引入，运行时已自动 init）----
+  // 钩子能力（installHook / uninstallToolHooks / wrapHook）不再作为散装全局暴露，
+  // 统一经 agent.tools.get('hooks') 取回 HooksTool 后调用（标准 tool 接口，避免框架不清的调用声明）。
   const MiniAgent: {
     agent: Agent;
     executor: ExecutorApi;
     handleToolCommand(text: string): Promise<void>;
-    installHook(
-      hookName: string,
-      when: 'before' | 'after',
-      fn: (opts: { args: unknown[]; [k: string]: unknown }) => unknown,
-      opts: Record<string, unknown>,
-    ): void;
-    uninstallToolHooks(toolName: string): void;
-    renderMarkdown(text: string): string;
+  };
+
+  // hooks 工具对象类型：经 agent.tools.get('hooks') 取回后强转使用（标准 tool 接口）。
+  type HooksTool = ToolDef & {
+    wrapHook: (fn: (...args: any[]) => any, thisArg?: any) => any;
+    installHook: (
+      targetName: string,
+      phase: 'before' | 'after',
+      fn: (opts: { args: any[]; result: any }) => void | Promise<void>,
+      opts?: Record<string, unknown>,
+    ) => any;
+    uninstallToolHooks: (toolName: string) => number;
   };
 }

@@ -2,7 +2,9 @@
 import { GM_setValue, GM_deleteValue, GM_listValues, GM_getValue } from '$';
 
 // 消费经 @require 引入的 basement 全局（运行时已自动 init）
-const { agent, installHook, uninstallToolHooks } = MiniAgent;
+const agent = MiniAgent.agent;
+// 钩子能力统一经标准 tool 接口取回（不再用散装全局 installHook / uninstallToolHooks）
+const hooks = agent.tools.get('hooks') as unknown as HooksTool;
 
 // 存储键常量（与 basement/src/core/storage.ts 同源；此处为环境层本地副本，避免跨 @require 导入）
 const NS_MEM = 'memory';
@@ -75,18 +77,18 @@ export const gmStorageTool: ToolDef = {
     }
     // 落盘钩子（before 阶段）：先写 GM，再执行 base（内存写入）。
     // 落盘失败（GM 抛错）→ before 抛错 → base 被跳过（见 hooks 契约）。
-    installHook('storageSet', 'before', (opts) => {
+    hooks.installHook('storageSet', 'before', (opts) => {
       const { key, val } = resolveSet(opts.args[0] as string, opts.args[1], opts.args[2]);
       GM_setValue(key, typeof val === 'string' ? val : JSON.stringify(val));
     }, { id: 'sys-gm-persist-set', name: 'GM 落盘(set)', toolName: 'gm_storage', core: true, agentRef: ctx.agent, execRef: ctx.executor });
-    installHook('storageDelete', 'before', (opts) => {
+    hooks.installHook('storageDelete', 'before', (opts) => {
       GM_deleteValue(resolveDel(opts.args[0] as string, opts.args[1] as string | undefined));
     }, { id: 'sys-gm-persist-del', name: 'GM 落盘(del)', toolName: 'gm_storage', core: true, agentRef: ctx.agent, execRef: ctx.executor });
     console.log('[MiniAgent] gm_storage 已挂载落盘钩子（storageSet/storageDelete → GM_*）');
   },
   // 卸载 = 摘除落盘钩子（运行期）；已落盘数据保留在 GM_*，重载可重建。
   unregister(_ctx): void {
-    uninstallToolHooks('gm_storage');
+    hooks.uninstallToolHooks('gm_storage');
     console.log('[MiniAgent] gm_storage 已卸载，落盘钩子已摘除');
   },
   call: async (args, ctx) => {

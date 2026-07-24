@@ -15,9 +15,16 @@ if (_tt) {
 }
 function setHTML(el: Element, html: string): void { el.innerHTML = _hp ? (_hp.createHTML(html) as unknown as string) : html; }
 
-// UI markdown 渲染：直接用 src/tools/marked.ts 的 renderMarkdown（依赖全局 marked/DOMPurify，
-// 二者均由 vite.config 的 @require 编译期注入 userscript 全局作用域，运行期直接消费，无运行时下载）。
-// marked 作为独立工具文件常驻 src（见 ARCHITECTURE §12.5），不接管 UI 渲染；UI 始终用此默认渲染器。
+// UI markdown 渲染：用 @require 注入的全局 marked + DOMPurify 本地渲染（不依赖 basement 暴露的 renderMarkdown 全局，
+// marked/DOMPurify 由 vite.config 的 @require 编译期注入 userscript 全局作用域，运行期直接消费，无运行时下载）。
+// 这样 basement 契约无需为展示层泄漏 renderMarkdown 全局，框架边界更清晰。
+// 本地渲染函数（替代原 MiniAgent.renderMarkdown）：
+declare const marked: { parse(src: string, opts?: Record<string, unknown>): string | Promise<string> };
+function renderMarkdownLocal(src: string): string {
+  const parsed = marked.parse(src);
+  const html = typeof parsed === 'string' ? parsed : '';
+  return DOMPurify.sanitize(html);
+}
 
 // 玻璃方框浮层（对齐 docs/ui-design.html v4）：容器透明无背景板、无圆角、深色玻璃 + 浅色字、顶部遮罩淡出
 const STYLE = `
@@ -288,7 +295,7 @@ export const ui = {
     },
 
     // 流结束：指定 id 的 assistant 气泡正文 + think 正文做 markdown 渲染（一次性，避免流式频繁 setHTML）。
-    // 渲染走默认 renderMarkdown（依赖全局 marked，由 @require 注入；marked 工具不接管 UI 渲染）。
+    // 渲染走本地 renderMarkdownLocal（@require 注入的 marked + DOMPurify）。
     finalize(mid: string, role: string, text: string, reasoning?: string): void {
       const el = bubblesById.get(mid) ?? null;
       if (!el) { console.warn('[MiniAgent.UI] finalize 跳过：找不到气泡', { mid, role, textLen: text?.length, reasoningLen: reasoning?.length }); return; }
@@ -299,11 +306,11 @@ export const ui = {
         if (!text || !text.trim()) {
           c.textContent = reasoning ? '(模型已思考，本轮未返回正文)' : '(空响应)';
         } else {
-          try { setHTML(c, MiniAgent.renderMarkdown(text)); } catch (e) { console.error('[MiniAgent.UI] renderMarkdown 异常:', e); c.textContent = text; }
+          try { setHTML(c, renderMarkdownLocal(text)); } catch (e) { console.error('[MiniAgent.UI] renderMarkdown 异常:', e); c.textContent = text; }
         }
       }
       const think = el.querySelector('.ma-think') as HTMLElement;
-      if (think) { if (reasoning) { const tb = el.querySelector('.ma-think-body') as HTMLElement; if (tb) setHTML(tb, MiniAgent.renderMarkdown(reasoning)); } else think.remove(); }
+      if (think) { if (reasoning) { const tb = el.querySelector('.ma-think-body') as HTMLElement; if (tb) setHTML(tb, renderMarkdownLocal(reasoning)); } else think.remove(); }
     },
 
     // 运行态：发送变身停止（绑 onStop=agent.chatStop）并禁用输入
