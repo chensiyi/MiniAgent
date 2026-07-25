@@ -108,11 +108,14 @@ export function definePreset(tools: ToolDef[]): void {
 
 // 重建自管理工具：读 tools 命名空间全部描述符 → 过滤启用项 → 构造 ToolDef → registerAll（拓扑序）。
 // 注册即重建：重建逻辑天然写在各工具的 register 里。
+// 同时尊重 disabledTools 黑名单（§3：黑名单内的工具即便描述符 enabled=true 也不进 boot）。
 function rehydrate(): void {
+  const agentRef = getAgent();
+  const disabled = new Set(agentRef?.config.disabledTools ?? []);
   const descs = storage.listToolDefs();
   const tools: ToolDef[] = [];
   for (const desc of descs) {
-    if (desc.enabled === false) continue; // §3：关闭项不进 boot
+    if (desc.enabled === false || disabled.has(desc.name)) continue; // §3：关闭项不进 boot
     try {
       tools.push(buildToolFromDesc(desc));
     } catch (e) {
@@ -124,17 +127,18 @@ function rehydrate(): void {
   else console.log('[MiniAgent] 重建工具:', registered);
 }
 
-// 启动编排：infra 始终在线（去重）→ 其余按 disabledTools 过滤（去重）→ 重建用户工具。
+// 启动编排：先注册 infra（去重）→ 镜像外部存储后才读 disabledTools → 其余按黑名单过滤 → 重建用户工具。
+// 关键时序：disabledTools 必须等 gm_storage 把 GM_* 镜像进内存后才读，否则刷新后黑名单失效。
 // 仅用工具自身的 deps 拓扑（hooks ← gm_storage ← ui），不再有人为优先级层。
 export function bootstrap(): void {
-  const agentRef = getAgent();
-  const disabled = new Set(agentRef?.config.disabledTools ?? []);
   const registeredNames = new Set(executor.list(true).map((t) => t.name));
   const infra = preset.filter((t) => t.infra && !registeredNames.has(t.name));
+  executor.registerAll(infra); // ① 基础能力：hooks 已 IIFE 注册去重跳过；gm_storage 在此镜像 GM_* → 内存
+  const agentRef = getAgent();
+  const disabled = new Set(agentRef?.config.disabledTools ?? []); // ② 镜像后才读配置（否则刷新后黑名单失效）
   const normal = preset.filter((t) => !t.infra && !disabled.has(t.name) && !registeredNames.has(t.name));
-  executor.registerAll(infra); // 基础能力：hooks 已在 IIFE 注册会去重跳过；gm_storage 等在此强制在线
-  executor.registerAll(normal); // 默认工具 + 环境层工具，按拓扑序与 disabledTools 过滤
-  rehydrate(); // 重建用户保存的自编排工具（"已装工具"）
+  executor.registerAll(normal); // ③ 默认工具 + 环境层工具，按拓扑序与 disabledTools 过滤
+  rehydrate(); // ④ 重建用户保存的自编排工具（同样尊重 disabledTools）
 }
 
 // 完整工具清单（含启用态），供 UI 启停面板渲染。以 preset 宇宙 + 用户描述符为真相源：
