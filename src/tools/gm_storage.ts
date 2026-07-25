@@ -1,10 +1,11 @@
 /// <reference path="../basement.d.ts" />
 import { GM_setValue, GM_deleteValue, GM_listValues, GM_getValue } from '$';
 
-// 消费经 @require 引入的 basement 全局（运行时已自动 init）
-const agent = MiniAgent.agent;
-// 钩子能力统一经标准 tool 接口取回（不再用散装全局 installHook / uninstallToolHooks）
-const hooks = agent.tools.get('hooks') as unknown as HooksTool;
+// 消费经 @require 引入的 basement 全局（运行时仅绑定 executor↔agent，不自动 init；
+// 启动由本工具的 register 在镜像完 GM_* 后触发 boot() 完成，hooks 随之就绪）。
+const { agent, boot } = MiniAgent;
+// hooks 经 boot() 注册后取回；存为模块级变量供 register / unregister 共用（不再顶层取）。
+let hooks: HooksTool | undefined;
 
 // 存储键常量（与 basement/src/core/storage.ts 同源；此处为环境层本地副本，避免跨 @require 导入）
 const NS_MEM = 'memory';
@@ -33,7 +34,6 @@ let mirrored = false;
 export const gmStorageTool: ToolDef = {
   name: 'gm_storage',
   author: 'sys',
-  deps: [{ name: 'hooks', author: 'sys' }],
   description: '统一的持久存储管理（默认 memory 命名空间，可指定其它 ns）。action 取值：get=读取键；set=写入键（update=true 时合并已有对象）；list=列出键（给定 ns 列该分区子键，不给 ns 按 session/tools/code/memory 分区概览）；del=删除键（不可恢复，删除前会请求确认）。用于记忆、配置、状态管理。底层 storage 为内存 Map，本工具经 before 钩子透明落盘到 GM_*，其它工具无需关心环境。',
   parameters: {
     type: 'object',
@@ -75,6 +75,11 @@ export const gmStorageTool: ToolDef = {
       }
       mirrored = true;
     }
+    // 触发核心启动：GM_* 镜像完成后调用 boot()，由 basement 注册 hooks / 读 config（真实 GM_* 值）
+    // / 注册默认工具 / 重建自编排与用户钩子。boot() 带守卫仅跑一次。
+    boot();
+    // 钩子能力统一经标准 tool 接口取回（boot 已注册 hooks，此刻可用；不再在模块顶层取）。
+    hooks = agent.tools.get('hooks') as unknown as HooksTool;
     // 落盘钩子（before 阶段）：先写 GM，再执行 base（内存写入）。
     // 落盘失败（GM 抛错）→ before 抛错 → base 被跳过（见 hooks 契约）。
     hooks.installHook('storageSet', 'before', (opts) => {
@@ -88,7 +93,7 @@ export const gmStorageTool: ToolDef = {
   },
   // 卸载 = 摘除落盘钩子（运行期）；已落盘数据保留在 GM_*，重载可重建。
   unregister(_ctx): void {
-    hooks.uninstallToolHooks('gm_storage');
+    hooks?.uninstallToolHooks('gm_storage');
     console.log('[MiniAgent] gm_storage 已卸载，落盘钩子已摘除');
   },
   call: async (args, ctx) => {

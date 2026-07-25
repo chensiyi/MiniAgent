@@ -3,12 +3,12 @@
 import { uiTool } from './tools/ui';
 import { gmStorageTool } from './tools/gm_storage';
 
-// 消费经 @require 引入的 basement 全局（运行时已自动 init：注册核心默认工具、读 config）
+// 消费经 @require 引入的 basement 全局（运行时仅绑定 executor↔agent，不自动 init）。
 const { agent, executor } = MiniAgent;
 
-// basement 已自动 init 并注册核心默认工具；此处叠加油猴环境能力（GM_* 存储 + UI）。
-// 顺序：先装 GM_* 镜像与落盘钩子（gm_storage 把 GM_* 镜像进内存 Map，覆盖 init 时种子出的默认 config，
-// 引擎运行期 agent.config 实时读 storage → 拿到真实 apiKey），再挂载 UI 接管输出槽。
+// basement 不自动启动：本脚本仅叠加油猴环境能力（GM_* 存储 + UI）。
+// 胶水只负责一次 registerAll：gm_storage.register 自包含「镜像 GM_* → 触发 boot() → 装落盘钩子」，
+// ui 经 deps:[gm_storage] 排在 boot 之后挂载（此时 hooks/默认工具已就绪、输出槽接管）。
 // UI 工具（含 launcher/headless 还原）已随 src/tools/ui.ts 一并归入 tools，模块加载时自管 createLauncher。
 executor.registerAll([gmStorageTool, uiTool]);
 
