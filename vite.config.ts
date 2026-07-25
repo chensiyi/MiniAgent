@@ -32,7 +32,7 @@ const updateURL = 'http://localhost:4173/miniagent.user.js';
 // ---- basement 核心经 @require 引入（当前版本，jsDelivr 按 tag 分发）----
 // 本地开发可设 MINIAGENT_BASEMENT_URL 指向本地静态服务器（如 http://localhost:4174/miniagent-basement.js），
 // 免去每次改 basement 后重新发 tag。产物需先在 basement 分支 `npm run build` 产出 dist/miniagent-basement.js。
-const basementVersion = '0.2.5';
+const basementVersion = '0.2.6';
 const basementUrl =
   process.env.MINIAGENT_BASEMENT_URL ??
   `https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@basement-${basementVersion}/dist/miniagent-basement.js`;
