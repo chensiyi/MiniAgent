@@ -1,5 +1,4 @@
-import { storage, NS } from './storage';
-import { buildToolFromDesc } from './sandbox';
+import { storage } from './storage';
 import { llm, type ChatMessage } from '../core/react_loop';
 import { markedTool } from '../tools/marked';
 import { REQUIRE_CODE_APPROVAL, APPROVAL_RISK_LEVEL, riskAtLeast, type AppConfig } from '../model/config';
@@ -19,8 +18,6 @@ export interface ExecutorLike {
   unregister(name: string): void;
   registerAll(tools: ToolDef[]): { registered: string[]; rejected: string[] };
   list(includeAll?: boolean): ToolDef[];
-  setEnabled(name: string, enabled: boolean): Promise<void>;
-  allToolStates(): { name: string; author?: string; enabled: boolean; builtin: boolean; description?: string }[];
   run(call: ToolCall, agentArg?: AgentLike): Promise<string>;
   requestApproval(
     call: { name: string; code?: unknown; riskLevel?: string },
@@ -75,6 +72,7 @@ export interface ToolDef {
   description: string;
   parameters: Record<string, unknown>; // 发给模型的 JSON Schema（OpenAI 标准字段名 parameters）：strict 模式由模型强制约束结构（required 列全属性 + additionalProperties:false）；tool 自身不再运行时维护输入校验（见 §8/§12.3）
   deps?: DepRef[]; // 前置依赖：按 name 匹配；author 不符→警告可继续（§5）
+  infra?: boolean; // 基础设施工具（如 hooks / 存储）：始终在线、不可经开关关闭（仅 tool_manager 读取，executor 忽略）
   riskLevel?: 'low' | 'medium' | 'high' | 'critical'; // 高危走确定性确认（§6/§9；阶段2接线）
   call?: (args: Record<string, unknown>, ctx: RunCtx) => Promise<string> | string; // 执行入口；有 call 才进 LLM 清单（§7）
   register?: (ctx: RegisterCtx) => void | Promise<void>; // 安装 / 重建入口（文档 register(ctx)）
@@ -195,24 +193,7 @@ export function resolveToolDesc(name: string): ToolDesc | undefined {
   } as ToolDesc;
 }
 
-// 删除工具：经用户确认闸后，移除持久化描述符并注销运行期注册；
-// 内置（sys）工具无 tools 命名空间描述符，删除后追加到 disabledTools 黑名单，重载不回注（避免"删了又回来"）。
-// remove / delete 两个 action 共用此实现，语义一致。
-export async function deleteTool(name: string, agent: AgentLike): Promise<string> {
-  const confirmed = await executor.requestApproval({ name: `tool_manager.delete(${name})`, riskLevel: 'high' }, agent);
-  if (!confirmed) return '已取消';
-  const persisted = storage.get<ToolDesc>('tools', name);
-  if (persisted) {
-    storage.del(NS.TOOLS, name); // 移除持久化（自管理工具真相源）
-    } else {
-      // 内置工具：无 tools 命名空间描述符 → 追加黑名单，重载不回注
-      const set = new Set(agent.config.disabledTools ?? []);
-      set.add(name);
-      agent.config.disabledTools = [...set]; // setter 触发 gm_storage 落盘钩子
-    }
-  executor.unregister(name); // 移除运行期注册（含还原其 register/unregister 编排）
-  return `已删除工具 ${name}`;
-}
+// 删除工具逻辑已迁移到 tool_manager（见 src/tools/tool_manager.ts 的 toolManager.deleteTool）：executor 只做哑注册表，不关心业务启停/删除。
 
 // 依赖校验（按 name 匹配；缺失→拒绝；author 不符→收集警告但可继续，§5）
 function checkDeps(tool: ToolDef): { ok: boolean; warns: string[] } {
@@ -262,6 +243,11 @@ export const executor = {
   // 绑定 agent 引用（init 时调用一次），供 register/unregister 构建 ctx 与按名挂载。
   attachAgent(a: AgentLike): void {
     _agent = a;
+  },
+
+  // 暴露已绑定的 agent（供 tool_manager 等模块在调用期取 config / 注册表，避免循环依赖）。
+  getAgent(): AgentLike | null {
+    return _agent;
   },
 
   // 注册单个工具：author 冲突→警告不覆盖；依赖缺失→拒绝；依赖 author 不符→警告可继续。
@@ -350,53 +336,13 @@ export const executor = {
     return includeAll ? all : all.filter((t) => typeof t.call === 'function');
   },
 
-  // 启停：自管理工具改 tools:<name>.enabled 并持久化；内置工具改 config.disabledTools 黑名单并持久化；均即时 register/unregister。
-  // 关闭 UI（ui 这个 tool 被禁用）是风险操作：须经确认闸（agent.extensions 的 'approval'，headless 自动放行）；
-  // 用户拒绝则保持原状、什么都不做（调用方负责还原开关视觉）。开启 UI 不确认（安全、可逆）。
-  async setEnabled(name: string, enabled: boolean): Promise<void> {
-    if (!enabled && name === 'ui') {
-      const ok = await executor.requestApproval({ name: 'ui.disable（关闭界面）', riskLevel: 'high' }, _agent ?? undefined);
-      if (!ok) return;
-    }
-    const desc = storage.get<ToolDesc>('tools', name);
-    if (desc) {
-      desc.enabled = enabled;
-      storage.set(NS.TOOLS, name, desc);
-    } else {
-      const set = new Set(_agent?.config.disabledTools ?? []);
-      if (enabled) set.delete(name);
-      else set.add(name);
-      if (_agent) { _agent.config.disabledTools = [...set]; } // setter 触发 gm_storage 落盘钩子
-    }
-    if (enabled) {
-      if (desc) {
-        try {
-          executor.register(buildToolFromDesc(desc));
-        } catch (e) {
-          console.warn('[MiniAgent] 重注册失败:', name, e);
-        }
-      } else {
-        const bt = [...defaultTools, ...extraBuiltinTools].find((t) => t.name === name);
-        if (bt) executor.register(bt);
-      }
-    } else {
-      executor.unregister(name);
-    }
-  },
+  // 启停（setEnabled）已由 tool_manager 接管（见 src/tools/tool_manager.ts）：executor 只做哑注册表，不关心业务启停逻辑。
 
-  // 全量工具状态（含启用态），供 chat_ui 启停面板渲染（文档 §3 三视图）。按 name 字母序排序。
-  allToolStates(): { name: string; author?: string; enabled: boolean; builtin: boolean; description?: string }[] {
-    const registered = new Set(registry.keys());
-    const states: { name: string; author?: string; enabled: boolean; builtin: boolean; description?: string }[] = [];
-    for (const t of [...defaultTools, ...extraBuiltinTools]) {
-      states.push({ name: t.name, author: t.author, enabled: registered.has(t.name), builtin: true, description: t.description });
-    }
-    for (const desc of storage.listToolDefs()) {
-      if (states.some((s) => s.name === desc.name)) continue;
-      states.push({ name: desc.name, author: desc.author, enabled: desc.enabled !== false, builtin: false, description: desc.description });
-    }
-    return states.sort((a, b) => a.name.localeCompare(b.name));
-  },
+
+
+  // 全量工具状态（含启用态）已迁移到 tool_manager.getStates()（以 preset 宇宙 + registry 为真相源）；executor 不再维护业务清单。
+
+
 
   // 执行一个工具调用，返回"观察结果"文本，回灌给 LLM 作为 tool 消息。
   // 危险工具确认闸在 base 内（run_js 或 riskLevel≥high/critical 时 await executor.requestApproval(..., ctx.agent)）。
@@ -449,23 +395,9 @@ export const executor = {
     }
   },
 
-  // 重建自管理工具：读 tools 命名空间全部描述符 → 过滤启用项 → 构造 ToolDef → registerAll（拓扑序）。
-  // 没有独立的 rehydrate 例程：重建逻辑天然写在各工具的 register 里，注册即重建。
-  rehydrateTools(): void {
-    const descs = storage.listToolDefs();
-    const tools: ToolDef[] = [];
-    for (const desc of descs) {
-      if (desc.enabled === false) continue; // §3：关闭项不进 boot
-      try {
-        tools.push(buildToolFromDesc(desc));
-      } catch (e) {
-        console.warn('[MiniAgent] 重建工具失败:', desc.name, e);
-      }
-    }
-    const { registered, rejected } = executor.registerAll(tools);
-    if (rejected.length) console.warn('[MiniAgent] 部分工具未注册（依赖缺失/循环）:', rejected);
-    else console.log('[MiniAgent] 重建工具:', registered);
-  },
+  // 自管理工具重建（rehydrate）已迁移到 tool_manager.rehydrate()（由 toolManager.bootstrap() 调用）；executor 不负责重建。
+
+
 
   // 用户钩子为内存级临时对象（调试用），经 hooks 工具的 addHook 在运行期安装，不持久化、不重建。
 };
@@ -483,6 +415,4 @@ export const defaultTools: ToolDef[] = [
   markedTool,
 ];
 
-// 由宿主（agent.ts）注入的额外内置工具（UI 等）。executor 不 import ui 以保持核心解耦；
-// 此数组供 bootList / allToolStates / setEnabled 统一枚举内置工具（含非 defaultTools 的内置）。
-export const extraBuiltinTools: ToolDef[] = [];
+// extraBuiltinTools 已废弃：内置工具宇宙统一由宿主层经 tool_manager.definePreset 注入（见 dev/src/agent.ts）；executor 不再维护额外内置清单。

@@ -1,8 +1,9 @@
 import { llm, ReActLoop, genMsgId, type ChatMessage, type ToolCallLite, type ChatResult } from './core/react_loop';
-import { executor, defaultTools, extraBuiltinTools, type ToolCall, type ToolDef, b64Decode } from './core/executor';
+import { executor, defaultTools, type ToolCall, type ToolDef, b64Decode } from './core/executor';
 import { storage } from './core/storage';
 import { normalizeConfig, type AppConfig } from './model/config';
 import { hooksTool } from './tools/hooks';
+import { toolManager } from './tools/tool_manager';
 
 // 把流式累积的 ToolCallLite 转成 executor 的 ToolCall（参数 JSON.parse）。
 // type 显式置 'function'，与 OpenAI tool call 格式对齐。
@@ -244,8 +245,8 @@ export type Agent = typeof agent;
 // 把 agent 绑定进 executor（使工具注册机制可用），并注册内核、环境无关的基础设施 hooks
 // （hooks 注册只捕获宿主引用，不读存储，IIFE 期安全）。
 // 外部存储（GM_* / localStorage）的镜像，以及「其余工具（默认工具 / UI / 用户保存工具）的注册」，
-// 由宿主环境层经标准 executor.registerAll 分段完成（见各分支胶水 / src/tools/gm_storage.ts）：
-// 先镜像外部存储 → 再按 config.disabledTools 过滤注册默认工具 → 重建用户保存的自管理工具。
+// 由宿主环境层经 tool_manager 编排完成（见各分支胶水 / dev/src/agent.ts）：
+// toolManager.definePreset([gmStorage, ...defaultTools, ui]) → toolManager.bootstrap()（先 infra → 按 disabledTools 过滤 → 重建用户工具）。
 executor.attachAgent(agent);
 // hooks 为内核基础设施（引擎钩子根基），环境无关、不读存储，IIFE 期直接注册。
 // 其余环境能力（GM_* 存储 / DOM UI 等）由宿主环境作为工具注册，且可依赖 hooks 已就绪。
@@ -326,6 +327,6 @@ export async function handleToolCommand(text: string): Promise<void> {
 // —— basement 只产出核心，环境层（GM_* 存储、DOM UI、localStorage 等）由各分支作为
 // 薄壳胶水挂载。以下为胶水所需的最小公开面。
 // ============================================================
-export { executor, defaultTools, extraBuiltinTools };
+export { executor, defaultTools, toolManager };
 export type { ToolDef, RegisterCtx, RunCtx } from './core/executor';
 export type { AppConfig } from './model/config';

@@ -332,6 +332,7 @@ import type { ToolDef } from '../core/executor';
 export const hooksTool: ToolDef & { wrapHook: typeof wrapHook; installHook: typeof installHook; uninstallToolHooks: typeof uninstallToolHooks } = {
   name: 'hooks',
   author: 'sys',
+  infra: true, // 基础设施工具：钩子根基，始终在线、不可经开关关闭
   description:
     '钩子系统（内置工具）：提供 wrapHook 方法，把普通函数包成可挂 before/after 钩子的函数；集中管理钩子的安装/卸载（installHook / uninstallHookById / uninstallHookByName / uninstallToolHooks / restoreAllWrapped）。包裹是懒的：首次给某目标挂钩时自动 wrapHook 并就地替换回宿主（维护 wrapedFns）。关闭本工具时 restoreAllWrapped 把全部被包裹函数还原为原始过程，不留悬挂钩子。各工具在 register 环节经 installHook 挂接系统钩子（如 session 落盘）。' +
     '同时提供面向用户/LLM 的 action：view（查看运行态快照：各钩子目标 sendMessage/engine/run/chat/requestApproval/storageSet/storageDelete 的运行期钩子清单（含 name 与 id）+ 工具清单 + 引擎（endpoint 的 model/baseURL））/ addHook（热挂接用户钩子，需传 name/target/phase/code；code 为钩子体，签名 (opts, agent, storage, executor, console)，可经 opts.args 改写请求体（chat.before 里改 opts.args[0].messages/.tools/.model/温度等即可在请求发出前编辑完整 ChatRequestBody））/ removeHook（移除用户钩子，需传 hookId 或 name；按 name 移除所有同名用户钩子）。addHook/removeHook 执行前均弹确认框。',
