@@ -1,9 +1,8 @@
 import { llm, ReActLoop, genMsgId, type ChatMessage, type ToolCallLite, type ChatResult } from './core/react_loop';
 import { executor, defaultTools, extraBuiltinTools, type ToolCall, type ToolDef, b64Decode } from './core/executor';
 import { storage } from './core/storage';
-import { LEGACY } from './core/storage';
-import { DEFAULT_CONFIG, SYSTEM_PROMPT, normalizeConfig, type AppConfig } from './model/config';
-import { rehydrateHooks, hooksTool } from './tools/hooks';
+import { normalizeConfig, type AppConfig } from './model/config';
+import { hooksTool } from './tools/hooks';
 
 // 把流式累积的 ToolCallLite 转成 executor 的 ToolCall（参数 JSON.parse）。
 // type 显式置 'function'，与 OpenAI tool call 格式对齐。
@@ -19,7 +18,7 @@ function toToolCall(t: ToolCallLite): ToolCall {
 
 // strict 模式合规归一（仅在请求边界做，非 tool 内部校验）：
 // 确保 object schema 带 additionalProperties:false，且 required 含全部属性键（OpenAI structured outputs 硬要求）。
-// 让内置与自编排（tool_manager 创建）工具的 schema 都能安全进入 strict:true，不依赖作者手写合规。
+// 让内置与自管理（tool_manager 创建）工具的 schema 都能安全进入 strict:true，不依赖作者手写合规。
 function ensureStrictSchema(s: unknown): Record<string, unknown> {
   if (!s || typeof s !== 'object') return s as Record<string, unknown>;
   const obj = s as Record<string, unknown>;
@@ -71,7 +70,9 @@ export const agent = {
   // 持久化由宿主环境的存储工具（油猴 gm_storage / 浏览器标签 ls_storage 等）透明完成，
   // 它们在自身 register 时把外部存储镜像进内存 Map 并装上落盘钩子。config 只保留纯数据定义。
   get config(): AppConfig {
-    return (agent.storage.get('config') as AppConfig) ?? ({ ...DEFAULT_CONFIG } as AppConfig);
+    // 每次读都经 normalizeConfig 兜底合并 DEFAULT_CONFIG（含 systemPrompt 默认），
+    // 不依赖启动时写一次——比 boot 种子更健壮，且对缺失字段自动回落默认值。
+    return normalizeConfig(agent.storage.get('config'));
   },
   set config(v: AppConfig) {
     agent.storage.set('config', v);
@@ -81,7 +82,7 @@ export const agent = {
   toolCallQueue: [] as ToolCall[], // 待执行的工具调用
   sessionId: '', // 当前会话 id（由 session 工具的 onRegister 生成）
   storage, // 逻辑存储层（命名空间分区），供运行时 / LLM 动态读写与编辑
-  llm, executor, // 暴露给 LLM 做自编排：动态注册工具 / 直接推理
+  llm, executor, // 暴露给 LLM 做自管理：动态注册工具 / 直接推理
   output: headlessSink, // 输出槽（核心契约）：引擎只写这里，不直连 UI；默认 headless 空实现，环境层挂载时替换
   extensions: new Map<string, unknown>(), // 通用能力注册表：环境层挂载时注册 'ui'/'approval'，工具与核心经此发现能力，不硬引用环境形状
   tools: new Map<string, ToolDef>(), // 按名挂载的权威表（文档 §5.2）
@@ -240,47 +241,16 @@ export type Agent = typeof agent;
 // 核心只暴露 headless 输出槽（agent.output）；UI 等环境能力由宿主环境经工具挂载，核心与其解耦。
 
 // 前提绑定（IIFE 加载即执行，属架构铁律允许的顶层副作用）：
-// 仅把 agent 绑定进 executor，使工具注册机制（executor.register/unregister）可用。
-// 不做任何「从存储启动」的事——外部存储（GM_* / localStorage）尚未镜像，此刻读存储必为空。
-// 真正的启动收口到 boot()，由环境层在「镜像完外部存储」后调用一次（见 src/tools/gm_storage.ts 等）。
+// 把 agent 绑定进 executor（使工具注册机制可用），并注册内核、环境无关的基础设施 hooks
+// （hooks 注册只捕获宿主引用，不读存储，IIFE 期安全）。
+// 外部存储（GM_* / localStorage）的镜像，以及「其余工具（默认工具 / UI / 用户保存工具）的注册」，
+// 由宿主环境层经标准 executor.registerAll 分段完成（见各分支胶水 / src/tools/gm_storage.ts）：
+// 先镜像外部存储 → 再按 config.disabledTools 过滤注册默认工具 → 重建用户保存的自管理工具。
 executor.attachAgent(agent);
+// hooks 为内核基础设施（引擎钩子根基），环境无关、不读存储，IIFE 期直接注册。
+// 其余环境能力（GM_* 存储 / DOM UI 等）由宿主环境作为工具注册，且可依赖 hooks 已就绪。
+executor.registerAll([hooksTool]);
 
-// 启动（唯一入口）：须在外部存储（GM_* / localStorage）镜像进内存 Map 之后由环境层调用一次。
-// ① 注册核心基础设施 hooks；② 读取扁平 config（缺失迁回旧 default）+ 种子系统提示 + LEGACY 迁移；
-// ③ 按 config.disabledTools 过滤并注册默认/内置工具；④ 重建启用的自编排工具；⑤ 重建用户钩子。
-// 因 rehydrateHooks 非幂等（重复跑会装重复钩子），本函数须且只须由环境层调用一次。
-let booted = false;
-export function boot(): void {
-  if (booted) return; // 守卫：仅执行一次
-  booted = true;
-  // 先注册核心基础设施：hooks（捕获宿主引用）。hooks 为引擎钩子根基，不受黑名单约束，
-  // 须先于下方写 config（确保钩子机制就绪）。
-  executor.registerAll([hooksTool]);
-  // 读取扁平 config（优先）；缺失则惰性迁回旧 default:config（兼容历史数据）
-  let raw = storage.get<Partial<AppConfig>>('config');
-  if (!raw) {
-    const legacyCfg = storage.get<Partial<AppConfig>>(LEGACY.CONFIG.ns, LEGACY.CONFIG.key);
-    if (legacyCfg) { raw = legacyCfg; storage.del(LEGACY.CONFIG.ns, LEGACY.CONFIG.key); }
-  }
-  const cfg = normalizeConfig(raw);
-  // 系统提示种子：首次运行 / 历史存档无 systemPrompt → 用源码种子 SYSTEM_PROMPT
-  if (cfg.systemPrompt === undefined) cfg.systemPrompt = SYSTEM_PROMPT;
-  agent.config = cfg;
-  // 一次性迁移：旧 default 命名空间下其余键（sessions）迁回扁平键
-  for (const legacy of Object.values(LEGACY)) {
-    if (legacy.key === LEGACY.CONFIG.key) continue; // config 已在上合并
-    const v = storage.get(legacy.ns, legacy.key);
-    if (v !== undefined) { storage.set(legacy.key, v); storage.del(legacy.ns, legacy.key); }
-  }
-  const disabled = new Set(agent.config.disabledTools ?? []);
-  // 注册其余默认工具（排除已注册的核心工具），剔除黑名单（文档 §3/§5.2）
-  const restTools = [...defaultTools, ...extraBuiltinTools].filter(
-    (t) => !disabled.has(t.name) && t.name !== 'hooks',
-  );
-  executor.registerAll(restTools); // 拓扑序注册默认工具（已剔除黑名单）
-  executor.rehydrateTools(); // 重建启用的自编排工具（拓扑序）
-  rehydrateHooks(agent); // 重建用户钩子（热插拔，刷新不丢）
-}
 
 // ---- 用户直接调用工具：/tool_name /param value /flag ----
 
@@ -356,6 +326,6 @@ export async function handleToolCommand(text: string): Promise<void> {
 // —— basement 只产出核心，环境层（GM_* 存储、DOM UI、localStorage 等）由各分支作为
 // 薄壳胶水挂载。以下为胶水所需的最小公开面。
 // ============================================================
-export { executor };
+export { executor, defaultTools, extraBuiltinTools };
 export type { ToolDef, RegisterCtx, RunCtx } from './core/executor';
 export type { AppConfig } from './model/config';

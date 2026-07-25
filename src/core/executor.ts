@@ -81,7 +81,7 @@ export interface ToolDef {
   unregister?: (ctx: RegisterCtx) => void | Promise<void>; // 卸载 / 还原入口
 }
 
-// 自编排工具的持久化描述符（可 JSON 序列化；tools 命名空间为真相源）
+// 自管理工具的持久化描述符（可 JSON 序列化；tools 命名空间为真相源）
 export interface ToolDesc {
   name: string;
   author?: string;
@@ -203,7 +203,7 @@ export async function deleteTool(name: string, agent: AgentLike): Promise<string
   if (!confirmed) return '已取消';
   const persisted = storage.get<ToolDesc>('tools', name);
   if (persisted) {
-    storage.del(NS.TOOLS, name); // 移除持久化（自编排工具真相源）
+    storage.del(NS.TOOLS, name); // 移除持久化（自管理工具真相源）
     } else {
       // 内置工具：无 tools 命名空间描述符 → 追加黑名单，重载不回注
       const set = new Set(agent.config.disabledTools ?? []);
@@ -350,7 +350,7 @@ export const executor = {
     return includeAll ? all : all.filter((t) => typeof t.call === 'function');
   },
 
-  // 启停：自编排工具改 tools:<name>.enabled 并持久化；内置工具改 config.disabledTools 黑名单并持久化；均即时 register/unregister。
+  // 启停：自管理工具改 tools:<name>.enabled 并持久化；内置工具改 config.disabledTools 黑名单并持久化；均即时 register/unregister。
   // 关闭 UI（ui 这个 tool 被禁用）是风险操作：须经确认闸（agent.extensions 的 'approval'，headless 自动放行）；
   // 用户拒绝则保持原状、什么都不做（调用方负责还原开关视觉）。开启 UI 不确认（安全、可逆）。
   async setEnabled(name: string, enabled: boolean): Promise<void> {
@@ -449,7 +449,7 @@ export const executor = {
     }
   },
 
-  // 重建自编排工具：读 tools 命名空间全部描述符 → 过滤启用项 → 构造 ToolDef → registerAll（拓扑序）。
+  // 重建自管理工具：读 tools 命名空间全部描述符 → 过滤启用项 → 构造 ToolDef → registerAll（拓扑序）。
   // 没有独立的 rehydrate 例程：重建逻辑天然写在各工具的 register 里，注册即重建。
   rehydrateTools(): void {
     const descs = storage.listToolDefs();
@@ -467,12 +467,12 @@ export const executor = {
     else console.log('[MiniAgent] 重建工具:', registered);
   },
 
-  // 用户钩子重建见 src/tools/hooks.ts 的 rehydrateHooks（由 agent.init 调用）。
+  // 用户钩子为内存级临时对象（调试用），经 hooks 工具的 addHook 在运行期安装，不持久化、不重建。
 };
 
-// 钩子体编译器见 ./sandbox 的 compileHook（由 hooks.ts 的 rehydrateHooks / hooks 的 call(addHook) 调用）。
+// 钩子体编译器见 ./sandbox 的 compileHook（由 hooks 的 call(addHook) 调用）。
 
-// 默认工具清单（统一能力面）：领域工具 + 自开发工具 + 系统编排管理。
+// 默认工具清单（统一能力面）：领域工具 + 自开发工具 + 系统工具管理。
 // 各工具定义已迁至 src/tools/（与 hooks/marked 同例）；全部由 agent.init() 注册；
 // hooks 工具既提供 wrapHook 等底层方法，又带 call（进 LLM 日常载荷，供查看/热更新运行期钩子）。
 export const defaultTools: ToolDef[] = [

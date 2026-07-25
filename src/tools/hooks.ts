@@ -326,31 +326,6 @@ export function restoreAllWrapped(): void {
   byTool.clear();
 }
 
-// 重建用户钩子：读 hooks 命名空间全部描述符 → 编译 → installHook 挂接（登记到注册表，便于 removeHook / 卸载清理）。
-// installHook 按 desc.target 名解析并懒包裹，故 hooks 的 call 无需预设 target 清单。
-// executor 经 agentRef.executor 注入（避免本模块运行期 import executor，保持无循环依赖）。
-export function rehydrateHooks(agentRef: AgentLike): void {
-  for (const id of storage.keys(NS.HOOKS)) {
-    const desc = storage.get<{ id: string; name: string; target: string; phase: string; code: string }>('hooks', id);
-    if (!desc || !desc.code) continue;
-    try {
-      const wrapped = compileHook(desc.code, desc.name, agentRef);
-      // installHook 按名解析 + 懒包裹 + 登记（toolName='hooks'，便于 removeHook 按 id/名移除、卸载时一次性清理）
-      installHook(desc.target, (desc.phase === 'after' ? 'after' : 'before'), wrapped as HookFn, {
-        id: desc.id,
-        name: desc.name,
-        toolName: 'hooks',
-        core: false,
-        agentRef,
-        execRef: agentRef.executor,
-      });
-      console.log('[MiniAgent] 重建钩子:', desc.name, '→', desc.target + '.' + desc.phase);
-    } catch (e) {
-      console.warn('[MiniAgent] 重建钩子失败:', desc.name, e);
-    }
-  }
-}
-
 // ===== 钩子工具：注册即初始化（捕获宿主引用）；挂接由 installHook 懒包裹 =====
 import type { ToolDef } from '../core/executor';
 
@@ -359,7 +334,7 @@ export const hooksTool: ToolDef & { wrapHook: typeof wrapHook; installHook: type
   author: 'sys',
   description:
     '钩子系统（内置工具）：提供 wrapHook 方法，把普通函数包成可挂 before/after 钩子的函数；集中管理钩子的安装/卸载（installHook / uninstallHookById / uninstallHookByName / uninstallToolHooks / restoreAllWrapped）。包裹是懒的：首次给某目标挂钩时自动 wrapHook 并就地替换回宿主（维护 wrapedFns）。关闭本工具时 restoreAllWrapped 把全部被包裹函数还原为原始过程，不留悬挂钩子。各工具在 register 环节经 installHook 挂接系统钩子（如 session 落盘）。' +
-    '同时作为用户/LLM 界面，提供 action：view（查看实时编排快照：各钩子目标 sendMessage/engine/run/chat/requestApproval/storageSet/storageDelete 的运行期钩子清单（含 name 与 id）+ 工具清单 + 引擎（endpoint 的 model/baseURL））/ addHook（热挂接用户钩子，需传 name/target/phase/code；code 为钩子体，签名 (opts, agent, storage, executor, console)，可经 opts.args 改写请求体（chat.before 里改 opts.args[0].messages/.tools/.model/温度等即可在请求发出前编辑完整 ChatRequestBody））/ removeHook（移除用户钩子，需传 hookId 或 name；按 name 移除所有同名用户钩子）。addHook/removeHook 执行前均弹确认框。',
+    '同时提供面向用户/LLM 的 action：view（查看运行态快照：各钩子目标 sendMessage/engine/run/chat/requestApproval/storageSet/storageDelete 的运行期钩子清单（含 name 与 id）+ 工具清单 + 引擎（endpoint 的 model/baseURL））/ addHook（热挂接用户钩子，需传 name/target/phase/code；code 为钩子体，签名 (opts, agent, storage, executor, console)，可经 opts.args 改写请求体（chat.before 里改 opts.args[0].messages/.tools/.model/温度等即可在请求发出前编辑完整 ChatRequestBody））/ removeHook（移除用户钩子，需传 hookId 或 name；按 name 移除所有同名用户钩子）。addHook/removeHook 执行前均弹确认框。',
   parameters: {
     type: 'object',
     properties: {
@@ -402,7 +377,7 @@ export const hooksTool: ToolDef & { wrapHook: typeof wrapHook; installHook: type
     restoreAllWrapped();
     console.log('[MiniAgent] 钩子系统已关闭，已还原全部被包裹函数');
   },
-  // 用户/LLM 界面：view 快照 + addHook/removeHook（原 orchestrate 工具的 call，已并入本工具）。
+  // 用户/LLM 操作入口：view 快照 + addHook/removeHook（原 orchestrate 工具的 call，已并入本工具）。
   // 不 import executor：经 ctx.executor 取 list/requestApproval，保持本模块无循环依赖。
   call: async (args, ctx) => {
     const action = String(args.action ?? 'view');
@@ -412,7 +387,7 @@ export const hooksTool: ToolDef & { wrapHook: typeof wrapHook; installHook: type
         const fn = getHookedTarget(t, ctx.agent, ctx.executor);
         // 懒包裹下，某些目标可能从未被挂钩（仍是原始函数，无 beforeExe/afterExe）→ 视为空列表，不报错。
         const hooked = fn && (fn as unknown as { __hooked?: boolean }).__hooked ? fn : null;
-        // 每个钩子带 name + id（user 钩子有 id，core 钩子也有稳定 id + 可读名）——便于编排查看与按名/按 id 排序
+        // 每个钩子带 name + id（user 钩子有 id，core 钩子也有稳定 id + 可读名）——便于查看与按名/按 id 排序
         const describe = (f: any): { name: string; id: string | null } => {
           if (f.__userHook) return { name: String(f.__name ?? 'userHook'), id: (f.__hookId as string) ?? null };
           if (f.__coreHook) return { name: String(f.__name ?? 'system'), id: (f.__hookId as string) ?? null };
