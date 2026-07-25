@@ -9,26 +9,39 @@ import { GM_setValue, GM_getValue } from './env';
 const { agent, toolManager, defaultTools } = MiniAgent;
 const hooksTool = defaultTools.find((t) => t.name === 'hooks');
 
-toolManager.definePreset([gmStorageTool, hooksTool!], [gmStorageTool, ...defaultTools, uiTool]);
-toolManager.bootstrap();
+// 清除 host.html 的初始加载提示（bootstrap 成功后替换为就绪状态）
+const appEl = document.getElementById('app');
+function setBootStatus(text: string): void {
+  if (appEl) appEl.textContent = text;
+}
 
-// 暴露全局单例（iframe 自身 window），便于调试 / 运行时编辑
-(globalThis as unknown as { agent: unknown }).agent = agent;
-(window as unknown as { MiniAgent: unknown }).MiniAgent = MiniAgent;
+try {
+  setBootStatus('MiniAgent 启动中…');
 
-// ---- 验证：跨站固定存储链路（iframe + CDN + localStorage）----
-// 在任意站点点书签 → iframe 源恒为 CDN 固定源 → 同一份 localStorage 跨站共享。
-const TEST_KEY = '__boot_test__';
-const stamp = 'ok@' + Date.now();
-GM_setValue(TEST_KEY, stamp);
-const got = GM_getValue(TEST_KEY);
-// eslint-disable-next-line no-alert
-alert(
-  'MiniAgent 书签已挂载（bookmarklet 分支）\n' +
-    'basement agent: ' +
-    typeof agent +
-    '\n存储跨站验证: ' +
-    got +
-    '\n当前源(应为 CDN 固定源): ' +
-    location.origin,
-);
+  toolManager.definePreset([gmStorageTool, hooksTool!], [gmStorageTool, ...defaultTools, uiTool]);
+  toolManager.bootstrap();
+
+  // 暴露全局单例（iframe 自身 window），便于调试 / 运行时编辑
+  (globalThis as unknown as { agent: unknown }).agent = agent;
+  (window as unknown as { MiniAgent: unknown }).MiniAgent = MiniAgent;
+
+  // ---- 验证：跨站固定存储链路（iframe + CDN + localStorage）----
+  const TEST_KEY = '__boot_test__';
+  const stamp = 'ok@' + Date.now();
+  GM_setValue(TEST_KEY, stamp);
+  const got = GM_getValue(TEST_KEY);
+
+  setBootStatus('✅ MiniAgent 就绪（' + location.origin + '）');
+
+  console.log('[MiniAgent] 书签已挂载', {
+    agent: typeof agent,
+    storageTest: got,
+    origin: location.origin,
+  });
+} catch (e) {
+  const msg = e instanceof Error ? e.message : String(e);
+  setBootStatus('❌ MiniAgent 启动失败: ' + msg);
+  console.error('[MiniAgent] bootstrap 异常:', e);
+  // eslint-disable-next-line no-alert
+  alert('MiniAgent 启动失败: ' + msg);
+}

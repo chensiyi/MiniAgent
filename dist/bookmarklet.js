@@ -731,17 +731,34 @@
 	//#region bookmarklet/bootstrap.ts
 	var { agent, toolManager, defaultTools } = MiniAgent;
 	var hooksTool = defaultTools.find((t) => t.name === "hooks");
-	toolManager.definePreset([gmStorageTool, hooksTool], [
-		gmStorageTool,
-		...defaultTools,
-		uiTool
-	]);
-	toolManager.bootstrap();
-	globalThis.agent = agent;
-	window.MiniAgent = MiniAgent;
-	var TEST_KEY = "__boot_test__";
-	GM_setValue(TEST_KEY, "ok@" + Date.now());
-	var got = GM_getValue(TEST_KEY);
-	alert("MiniAgent 书签已挂载（bookmarklet 分支）\nbasement agent: " + typeof agent + "\n存储跨站验证: " + got + "\n当前源(应为 CDN 固定源): " + location.origin);
+	var appEl = document.getElementById("app");
+	function setBootStatus(text) {
+		if (appEl) appEl.textContent = text;
+	}
+	try {
+		setBootStatus("MiniAgent 启动中…");
+		toolManager.definePreset([gmStorageTool, hooksTool], [
+			gmStorageTool,
+			...defaultTools,
+			uiTool
+		]);
+		toolManager.bootstrap();
+		globalThis.agent = agent;
+		window.MiniAgent = MiniAgent;
+		const TEST_KEY = "__boot_test__";
+		GM_setValue(TEST_KEY, "ok@" + Date.now());
+		const got = GM_getValue(TEST_KEY);
+		setBootStatus("✅ MiniAgent 就绪（" + location.origin + "）");
+		console.log("[MiniAgent] 书签已挂载", {
+			agent: typeof agent,
+			storageTest: got,
+			origin: location.origin
+		});
+	} catch (e) {
+		const msg = e instanceof Error ? e.message : String(e);
+		setBootStatus("❌ MiniAgent 启动失败: " + msg);
+		console.error("[MiniAgent] bootstrap 异常:", e);
+		alert("MiniAgent 启动失败: " + msg);
+	}
 	//#endregion
 })();
