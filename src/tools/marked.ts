@@ -67,7 +67,6 @@ export const markedTool: ToolDef = {
       text: { type: 'string', description: '要渲染的 markdown 源文本' },
     },
     required: ['text'],
-    additionalProperties: false,
   },
   call: (_args) => renderMarkdown(String(_args.text ?? '')),
 };

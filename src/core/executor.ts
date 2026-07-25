@@ -72,7 +72,6 @@ export interface ToolDef {
   description: string;
   parameters: Record<string, unknown>; // 发给模型的 JSON Schema（OpenAI 标准字段名 parameters）：strict 模式由模型强制约束结构（required 列全属性 + additionalProperties:false）；tool 自身不再运行时维护输入校验（见 §8/§12.3）
   deps?: DepRef[]; // 前置依赖：按 name 匹配；author 不符→警告可继续（§5）
-  infra?: boolean; // 基础设施工具（如 hooks / 存储）：始终在线、不可经开关关闭（仅 tool_manager 读取，executor 忽略）
   riskLevel?: 'low' | 'medium' | 'high' | 'critical'; // 高危走确定性确认（§6/§9；阶段2接线）
   call?: (args: Record<string, unknown>, ctx: RunCtx) => Promise<string> | string; // 执行入口；有 call 才进 LLM 清单（§7）
   register?: (ctx: RegisterCtx) => void | Promise<void>; // 安装 / 重建入口（文档 register(ctx)）
@@ -340,7 +339,7 @@ export const executor = {
 
 
 
-  // 全量工具状态（含启用态）已迁移到 tool_manager.getStates()（以 preset 宇宙 + registry 为真相源）；executor 不再维护业务清单。
+  // 全量工具状态（含启用态）已迁移到 tool_manager.getStates()（以 baseTools+allTools 宇宙 + registry 为真相源）；executor 不再维护业务清单。
 
 
 

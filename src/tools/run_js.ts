@@ -17,7 +17,6 @@ export const runJsTool: ToolDef = {
       },
     },
     required: ['code'],
-    additionalProperties: false,
   },
   call: (args, ctx) => {
     const code = args.code as string;

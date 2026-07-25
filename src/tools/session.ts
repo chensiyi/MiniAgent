@@ -88,7 +88,6 @@ export const sessionTool: ToolDef = {
       id: { type: 'string', description: 'switch / remove 的目标会话 id' },
     },
     required: ['action'],
-    additionalProperties: false,
   },
   register: (ctx) => {
     const id = genSessionId();

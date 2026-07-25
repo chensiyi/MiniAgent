@@ -246,7 +246,7 @@ export type Agent = typeof agent;
 // （hooks 注册只捕获宿主引用，不读存储，IIFE 期安全）。
 // 外部存储（GM_* / localStorage）的镜像，以及「其余工具（默认工具 / UI / 用户保存工具）的注册」，
 // 由宿主环境层经 tool_manager 编排完成（见各分支胶水 / dev/src/agent.ts）：
-// toolManager.definePreset([gmStorage, ...defaultTools, ui]) → toolManager.bootstrap()（先 infra → 按 disabledTools 过滤 → 重建用户工具）。
+// toolManager.definePreset([gmStorage, hooks], [gmStorage, ...defaultTools, ui]) → toolManager.bootstrap()（先 baseTools → 按 disabledTools 过滤 allTools → 重建用户工具）。
 executor.attachAgent(agent);
 // hooks 为内核基础设施（引擎钩子根基），环境无关、不读存储，IIFE 期直接注册。
 // 其余环境能力（GM_* 存储 / DOM UI 等）由宿主环境作为工具注册，且可依赖 hooks 已就绪。

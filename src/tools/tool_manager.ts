@@ -85,25 +85,27 @@ function exportToolToCmd(desc: ToolDesc): string | { error: string } {
 // ============================================================
 // 工具生命周期管理器（2026-07-25 从 executor 迁入）
 // 内核 executor 只做哑注册表；预装宇宙 / bootstrap / 启停 / 重建 全部收归本模块。
-// 设计（遵循用户定调）：
+// 设计（遵循用户定调的 boot(baseTools, allTools) 两列表模型）：
 //  - 依赖关系只活在工具自身的 deps 图（hooks ← gm_storage ← ui），由 registerAll 内部拓扑序处理，不另设优先级层；
-//  - infra 工具（hooks / 存储）始终在线、不可经开关关闭（否则持久化/钩子根基崩塌）；
-//  - 预装清单（preset）由宿主层 definePreset 注入，dev 拼装 [gmStorage, ...defaultTools, ui]；
-//  - bootstrap：先注册 infra（去重）→ 再按 disabledTools 过滤注册其余 → 重建用户持久化工具；
-//  - getStates：以 preset 宇宙 + 用户描述符为真相源构建完整清单（已注册=启用）。
+//  - baseTools：基础能力（hooks / 存储），始终先注册（须在读取 disabledTools 前建立存储/配置镜像），不可经开关关闭；
+//  - allTools：完整预装（默认工具 + 环境层工具 ui），按 disabledTools 黑名单过滤后注册；
+//  - bootstrap：先注册 baseTools（去重）→ 镜像外部存储后才读 disabledTools → 再按黑名单过滤注册 allTools → 重建用户工具；
+//  - getStates：以 baseTools+allTools 宇宙 + 用户描述符为真相源构建完整清单（已注册=启用）。
 // ============================================================
 
-// 预装宇宙（宿主层经 definePreset 注入）：完整能力面，含 infra / 默认工具 / 环境层工具（ui）。
-let preset: ToolDef[] = [];
+// 预装宇宙（宿主层经 definePreset 注入）：拆分为 baseTools（基础能力，始终先注册）与 allTools（完整预装，按黑名单过滤）。
+let baseTools: ToolDef[] = [];
+let allTools: ToolDef[] = [];
 
 // 取已绑定 agent（executor 暴露，避免循环依赖）。
 function getAgent() {
   return executor.getAgent();
 }
 
-// 宿主层注入预装宇宙（dev 拼装后调用一次）。
-export function definePreset(tools: ToolDef[]): void {
-  preset = tools;
+// 宿主层注入预装宇宙（dev 按 boot(baseTools, allTools) 两列表拼装后调用一次）。
+export function definePreset(base: ToolDef[], all: ToolDef[]): void {
+  baseTools = base;
+  allTools = all;
 }
 
 // 重建自管理工具：读 tools 命名空间全部描述符 → 过滤启用项 → 构造 ToolDef → registerAll（拓扑序）。
@@ -127,26 +129,26 @@ function rehydrate(): void {
   else console.log('[MiniAgent] 重建工具:', registered);
 }
 
-// 启动编排：先注册 infra（去重）→ 镜像外部存储后才读 disabledTools → 其余按黑名单过滤 → 重建用户工具。
+// 启动编排：先注册 baseTools（去重）→ 镜像外部存储后才读 disabledTools → 再按黑名单过滤注册 allTools → 重建用户工具。
 // 关键时序：disabledTools 必须等 gm_storage 把 GM_* 镜像进内存后才读，否则刷新后黑名单失效。
 // 仅用工具自身的 deps 拓扑（hooks ← gm_storage ← ui），不再有人为优先级层。
 export function bootstrap(): void {
   const registeredNames = new Set(executor.list(true).map((t) => t.name));
-  const infra = preset.filter((t) => t.infra && !registeredNames.has(t.name));
-  executor.registerAll(infra); // ① 基础能力：hooks 已 IIFE 注册去重跳过；gm_storage 在此镜像 GM_* → 内存
+  // ① baseTools：基础能力始终先注册（建立存储/配置镜像，须在读取 disabledTools 之前）；已注册的去重跳过。
+  executor.registerAll(baseTools.filter((t) => !registeredNames.has(t.name)));
   const agentRef = getAgent();
   const disabled = new Set(agentRef?.config.disabledTools ?? []); // ② 镜像后才读配置（否则刷新后黑名单失效）
-  const normal = preset.filter((t) => !t.infra && !disabled.has(t.name) && !registeredNames.has(t.name));
-  executor.registerAll(normal); // ③ 默认工具 + 环境层工具，按拓扑序与 disabledTools 过滤
+  // ③ allTools：按 disabledTools 黑名单过滤（已注册/禁用的跳过），拓扑序注册。
+  executor.registerAll(allTools.filter((t) => !disabled.has(t.name) && !registeredNames.has(t.name)));
   rehydrate(); // ④ 重建用户保存的自编排工具（同样尊重 disabledTools）
 }
 
-// 完整工具清单（含启用态），供 UI 启停面板渲染。以 preset 宇宙 + 用户描述符为真相源：
-// 已注册=启用；preset 中未注册=关闭（可重新启用）；用户描述符中未在 preset 的=自管理工具。
+// 完整工具清单（含启用态），供 UI 启停面板渲染。以 baseTools+allTools 宇宙 + 用户描述符为真相源：
+// 已注册=启用；预装中未注册=关闭（可重新启用）；用户描述符中未在预装的=自管理工具。
 export function getStates(): { name: string; author?: string; enabled: boolean; builtin: boolean; description?: string }[] {
   const registeredNames = new Set(executor.list(true).map((t) => t.name));
   const universe = new Map<string, { name: string; author?: string; description?: string; builtin: boolean }>();
-  for (const t of preset) {
+  for (const t of [...baseTools, ...allTools]) {
     universe.set(t.name, { name: t.name, author: t.author, description: t.description, builtin: true });
   }
   for (const desc of storage.listToolDefs()) {
@@ -162,11 +164,11 @@ export function getStates(): { name: string; author?: string; enabled: boolean; 
 }
 
 // 启停：自管理工具改 tools:<name>.enabled 并持久化；内置工具改 config.disabledTools 黑名单并持久化；均即时 register/unregister。
-// 关闭 UI 是风险操作：须经确认闸；infra 工具拒绝关闭（始终保持在线）。
+// 关闭 UI 是风险操作：须经确认闸；baseTools（基础能力）拒绝关闭（始终保持在线，否则存储/钩子根基崩塌）。
 export async function setEnabled(name: string, enabled: boolean): Promise<void> {
-  const bt = preset.find((t) => t.name === name);
-  if (bt?.infra) {
-    console.warn('[MiniAgent] infra 工具不可关闭（始终保持在线）:', name);
+  const bt = [...baseTools, ...allTools].find((t) => t.name === name);
+  if (baseTools.some((t) => t.name === name)) {
+    console.warn('[MiniAgent] 基础工具不可关闭（始终保持在线）:', name);
     return;
   }
   if (!enabled && name === 'ui') {
@@ -248,7 +250,6 @@ export const toolManagerTool: ToolDef = {
       description: { type: 'string', description: '工具说明（register 必需），会展示给 LLM 作为该工具的能力描述。' },
       parameters: {
         type: 'object',
-        additionalProperties: false,
         description: '新工具的参数声明（JSON Schema，register 必需）。格式如 { type:"object", properties: { 参数名: { type, description, ... } }, required: ["参数名"], additionalProperties:false }，会直接传给 LLM 决定如何调用（strict 模式：required 必须列全部属性）。',
       },
       deps: { type: 'array', description: '可选前置依赖，元素形如 { name, author?, version? }；按 name 匹配，author 不符仅警告、缺失则拒绝注册。' },
@@ -264,7 +265,6 @@ export const toolManagerTool: ToolDef = {
       all: { type: 'boolean', description: 'list 动作专用：是否枚举全量工具。默认 true（=全量，含无 call 的系统原语）；传 false 则仅列出可被 LLM 调用的工具（typeof call===\'function\'）。' },
     },
     required: ['action'],
-    additionalProperties: false,
   },
   call: async (args, ctx) => {
     const action = String(args.action ?? '');
