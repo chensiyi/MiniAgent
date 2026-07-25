@@ -2,9 +2,9 @@
 import { GM_setValue, GM_deleteValue, GM_listValues, GM_getValue } from '$';
 
 // 消费经 @require 引入的 basement 全局（运行时仅绑定 executor↔agent，不自动 init；
-// 启动由本工具的 register 在镜像完 GM_* 后触发 boot() 完成，hooks 随之就绪）。
-const { agent, boot } = MiniAgent;
-// hooks 经 boot() 注册后取回；存为模块级变量供 register / unregister 共用（不再顶层取）。
+// hooks 已由 basement IIFE 注册为环境无关内核，本工具 register 仅需取回即可）。
+const { agent } = MiniAgent;
+// hooks 经 agent.tools.get('hooks') 取回；存为模块级变量供 register / unregister 共用。
 let hooks: HooksTool | undefined;
 
 // 存储键常量（与 basement/src/core/storage.ts 同源；此处为环境层本地副本，避免跨 @require 导入）
@@ -29,6 +29,7 @@ let mirrored = false;
 // 落盘能力（核心职责）：storage 本身是「内存 Map + CRUD」，不含任何 GM_* 写入；
 // 本工具在 register 时把 GM_* 一次性镜像进内存 Map，并包裹 storage.set / storage.del
 // 装上 GM 落盘 before 钩子，使一切 storage 写操作透明落盘——其它工具只管读 storage，无需关心运行环境。
+// 本工具仅负责「镜像 + 落盘」，不触发任何核心启动（启动由 dev 胶水分段 registerAll 编排）。
 // before 阶段落盘：若 GM 写入抛错（如配额超限），base（内存写入）被跳过，原方法不执行
 // （hooks 契约：before 钩子抛错 → 不执行 base，见 hooks.ts wrapHook）。
 export const gmStorageTool: ToolDef = {
@@ -60,7 +61,8 @@ export const gmStorageTool: ToolDef = {
     required: ['action', 'key', 'value', 'ns', 'update'],
     additionalProperties: false,
   },
-  // 注册 = 安装落盘机制：确保内存镜像就绪 + 包裹 storage.set/del + 装 GM 落盘 before 钩子。
+  // 注册 = 安装落盘机制：确保内存镜像就绪 + 取回 hooks + 包裹 storage.set/del + 装 GM 落盘 before 钩子。
+  // 本工具只负责「镜像 + 落盘」，不触发任何核心启动（启动由 dev 胶水分段 registerAll 编排）。
   register(ctx): void {
     // 启动期把 GM_* 一次性镜像进内存 Map（幂等；纯内存 Storage 不含 load，由环境层在此完成）。
     if (!mirrored) {
@@ -75,10 +77,7 @@ export const gmStorageTool: ToolDef = {
       }
       mirrored = true;
     }
-    // 触发核心启动：GM_* 镜像完成后调用 boot()，由 basement 注册 hooks / 读 config（真实 GM_* 值）
-    // / 注册默认工具 / 重建自编排与用户钩子。boot() 带守卫仅跑一次。
-    boot();
-    // 钩子能力统一经标准 tool 接口取回（boot 已注册 hooks，此刻可用；不再在模块顶层取）。
+    // hooks 已由 basement IIFE 注册（环境无关内核），此处经标准接口取回即可（无需顶层取、无需 boot）。
     hooks = agent.tools.get('hooks') as unknown as HooksTool;
     // 落盘钩子（before 阶段）：先写 GM，再执行 base（内存写入）。
     // 落盘失败（GM 抛错）→ before 抛错 → base 被跳过（见 hooks 契约）。

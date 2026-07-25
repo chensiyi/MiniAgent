@@ -58,6 +58,7 @@ declare global {
     allToolStates(): ToolState[];
     setEnabled(name: string, enabled: boolean): Promise<void> | void;
     requestApproval(call: { name: string; code?: string; riskLevel?: string }, agent: Agent): Promise<boolean>;
+    rehydrateTools(): void;
   };
 
   type Agent = {
@@ -72,15 +73,17 @@ declare global {
     chat: { sendMessage(text: string): Promise<void> };
   };
 
-  // ---- basement IIFE 全局（@require 引入；运行时仅绑定 executor↔agent，不自动 init）----
-  // 真正启动由环境层经 gm_storage.register 触发 boot() 完成（唯一一次）：注册 hooks / 读 config / 注册默认工具 / 重建。
+  // ---- basement IIFE 全局（@require 引入；运行时仅绑定 executor↔agent + 注册内核 hooks，不自动启动其余工具）----
+  // 启动由各环境分支的胶水分段 registerAll 编排：先注册存储工具（镜像外部存储），
+  // 再按 config.disabledTools 注册默认工具 + UI，最后重建用户保存的自编排工具。
   // 钩子能力（installHook / uninstallToolHooks / wrapHook）不再作为散装全局暴露，
   // 统一经 agent.tools.get('hooks') 取回 HooksTool 后调用（标准 tool 接口，避免框架不清的调用声明）。
   const MiniAgent: {
     agent: Agent;
     executor: ExecutorApi;
     handleToolCommand(text: string): Promise<void>;
-    boot(): void;
+    defaultTools: ToolDef[];
+    extraBuiltinTools: ToolDef[];
   };
 
   // hooks 工具对象类型：经 agent.tools.get('hooks') 取回后强转使用（标准 tool 接口）。

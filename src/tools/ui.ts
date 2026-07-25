@@ -429,14 +429,14 @@ function createLauncher(): void {
   el.style.display = uiUp ? 'none' : '';
 }
 
-// 消费经 @require 引入的 basement 全局（运行时仅绑定 executor↔agent，不自动 init；核心启动由 gm_storage.register 触发 boot() 完成）
+// 消费经 @require 引入的 basement 全局（运行时仅绑定 executor↔agent，IIFE 已注册内核 hooks；不自动启动其余工具）
 const { agent, handleToolCommand } = MiniAgent;
 
 // UI 工具：注册后挂载聊天界面并接管输出/渲染/确认闸；禁用即"关闭界面"（经确认闸、可逆），核心仍 headless 运行。启用即重新挂载。
 export const uiTool: ToolDef = {
   name: 'ui',
   author: 'sys',
-  deps: [{ name: 'gm_storage', author: 'sys' }], // 依赖 gm_storage：确保其 register（镜像 GM_* + 触发 boot）先执行，ui 挂载时 hooks/默认工具已就绪
+  deps: [{ name: 'gm_storage', author: 'sys' }], // 依赖 gm_storage：确保其 register（镜像 GM_*）先执行，ui 挂载时 hooks/默认工具已就绪
   description: '界面工具：注册后挂载聊天界面并接管输出/渲染/确认闸；在工具清单禁用即"关闭界面"（经确认闸、可逆），核心仍 headless 运行。启用即重新挂载。',
   parameters: {},
   register: async (_ctx) => {
