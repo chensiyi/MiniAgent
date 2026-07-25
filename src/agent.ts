@@ -17,10 +17,10 @@ toolManager.bootstrap(); // 启动编排（baseTools 在线 → 按 disabledTool
 // 暴露全局单例（标准用户脚本空间：沙箱内 globalThis，便于运行时 / LLM 动态编辑）
 (globalThis as unknown as { agent: Agent }).agent = agent;
 
-// 仅 dev 分支额外挂到 unsafeWindow，使 DevTools 控制台可直接访问（补偿 userscript 沙箱隔离）；
-// 发布分支（main/master 等）一律不挂，避免与页面主世界互相影响。
-declare const __BUILD_BRANCH__: string;
-if (__BUILD_BRANCH__ === 'dev') {
+// 仅调试构建（npm run dev 的 serve，或 npm run test → vite build --mode test）额外挂到 unsafeWindow，
+// 使 DevTools 控制台可直接访问（补偿 userscript 沙箱隔离）；
+// 生产构建（npm run build，mode=production）一律不挂，避免与页面主世界互相影响。
+if (import.meta.env.DEV || import.meta.env.MODE === 'test') {
   const uw = (globalThis as unknown as { unsafeWindow?: typeof globalThis }).unsafeWindow;
   if (uw) (uw as Record<string, unknown>).agent = agent;
 }
