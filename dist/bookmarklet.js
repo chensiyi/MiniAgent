@@ -1,30 +1,36 @@
-// ==UserScript==
-// @name         MiniAgent
-// @namespace    https://github.com/chensiyi/MiniAgent
-// @version      0.2.0.20260726005557
-// @description  极简 userScript 智能体（原生 DOM + GM 桥接 LLM；核心经 @require 引入 basement 全局 MiniAgent）
-// @downloadURL  https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@dev/dist/miniagent.user.js
-// @updateURL    https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@dev/dist/miniagent.user.js
-// @match        *://*/*
-// @require      https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@basement-0.2.6/dist/miniagent-basement.js
-// @require      https://cdn.jsdelivr.net/npm/marked@12/marked.min.js
-// @require      https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js
-// @connect      *
-// @grant        GM_addStyle
-// @grant        GM_deleteValue
-// @grant        GM_getValue
-// @grant        GM_listValues
-// @grant        GM_setValue
-// @noframes
-// ==/UserScript==
-
 (function() {
-	"use strict";
-	var _GM_addStyle = (() => typeof GM_addStyle != "undefined" ? GM_addStyle : void 0)();
-	var _GM_deleteValue = (() => typeof GM_deleteValue != "undefined" ? GM_deleteValue : void 0)();
-	var _GM_getValue = (() => typeof GM_getValue != "undefined" ? GM_getValue : void 0)();
-	var _GM_listValues = (() => typeof GM_listValues != "undefined" ? GM_listValues : void 0)();
-	var _GM_setValue = (() => typeof GM_setValue != "undefined" ? GM_setValue : void 0)();
+	//#region bookmarklet/env.ts
+	var NS = "miniagent:";
+	function GM_setValue(key, value) {
+		localStorage.setItem(NS + key, JSON.stringify(value));
+	}
+	function GM_getValue(key, defaultValue) {
+		const raw = localStorage.getItem(NS + key);
+		if (raw === null) return defaultValue;
+		try {
+			return JSON.parse(raw);
+		} catch {
+			return raw;
+		}
+	}
+	function GM_deleteValue(key) {
+		localStorage.removeItem(NS + key);
+	}
+	function GM_listValues() {
+		const out = [];
+		for (let i = 0; i < localStorage.length; i++) {
+			const k = localStorage.key(i);
+			if (k && k.startsWith(NS)) out.push(k.slice(10));
+		}
+		return out;
+	}
+	function GM_addStyle(css) {
+		const style = document.createElement("style");
+		style.textContent = css;
+		document.head.appendChild(style);
+	}
+	//#endregion
+	//#region src/tools/ui.ts
 	var _tt = globalThis.trustedTypes;
 	var _hp = null;
 	if (_tt) {
@@ -122,7 +128,7 @@
 	var input;
 	var sendBtn;
 	var stopBtn;
-	var bubblesById = new Map();
+	var bubblesById = /* @__PURE__ */ new Map();
 	var bubbleSeq = 0;
 	var acEl = null;
 	var acItems = [];
@@ -137,7 +143,7 @@
 		const hasPrefix = lastSpace > 0;
 		const propsOf = (name) => MiniAgent.executor.list(true).find((t) => t.name === name)?.parameters?.properties ?? {};
 		const usedParams = (toolName, activeQ) => {
-			const used = new Set();
+			const used = /* @__PURE__ */ new Set();
 			const re = /\/(\S+)/g;
 			let m;
 			while (m = re.exec(text)) {
@@ -219,7 +225,7 @@
 		chat: {
 			mount(onSend) {
 				if (document.getElementById("miniagent-root")) return;
-				_GM_addStyle(STYLE);
+				GM_addStyle(STYLE);
 				root = document.createElement("div");
 				root.id = "miniagent-root";
 				setHTML(root, `
@@ -552,6 +558,8 @@
 		}
 	};
 	createLauncher();
+	//#endregion
+	//#region src/tools/gm_storage.ts
 	var { agent: agent$1 } = MiniAgent;
 	var hooks;
 	var NS_MEM = "memory";
@@ -625,8 +633,8 @@
 		},
 		register(ctx) {
 			if (!mirrored) {
-				for (const k of _GM_listValues()) {
-					const raw = _GM_getValue(k, void 0);
+				for (const k of GM_listValues()) {
+					const raw = GM_getValue(k, void 0);
 					if (raw === void 0 || raw === null) continue;
 					try {
 						agent$1.storage.set("", k, JSON.parse(raw));
@@ -639,7 +647,7 @@
 			hooks = agent$1.tools.get("hooks");
 			hooks.installHook("storageSet", "before", (opts) => {
 				const { key, val } = resolveSet(opts.args[0], opts.args[1], opts.args[2]);
-				_GM_setValue(key, typeof val === "string" ? val : JSON.stringify(val));
+				GM_setValue(key, typeof val === "string" ? val : JSON.stringify(val));
 			}, {
 				id: "sys-gm-persist-set",
 				name: "GM 落盘(set)",
@@ -649,7 +657,7 @@
 				execRef: ctx.executor
 			});
 			hooks.installHook("storageDelete", "before", (opts) => {
-				_GM_deleteValue(resolveDel(opts.args[0], opts.args[1]));
+				GM_deleteValue(resolveDel(opts.args[0], opts.args[1]));
 			}, {
 				id: "sys-gm-persist-del",
 				name: "GM 落盘(del)",
@@ -719,6 +727,8 @@
 			}
 		}
 	};
+	//#endregion
+	//#region bookmarklet/bootstrap.ts
 	var { agent, toolManager, defaultTools } = MiniAgent;
 	var hooksTool = defaultTools.find((t) => t.name === "hooks");
 	toolManager.definePreset([gmStorageTool, hooksTool], [
@@ -728,4 +738,10 @@
 	]);
 	toolManager.bootstrap();
 	globalThis.agent = agent;
+	window.MiniAgent = MiniAgent;
+	var TEST_KEY = "__boot_test__";
+	GM_setValue(TEST_KEY, "ok@" + Date.now());
+	var got = GM_getValue(TEST_KEY);
+	alert("MiniAgent 书签已挂载（bookmarklet 分支）\nbasement agent: " + typeof agent + "\n存储跨站验证: " + got + "\n当前源(应为 CDN 固定源): " + location.origin);
+	//#endregion
 })();

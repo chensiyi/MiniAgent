@@ -19,7 +19,7 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: 'dist-bookmarklet',
+    outDir: 'dist',
     emptyOutDir: false,
     lib: {
       entry: resolve(__dirname, 'bookmarklet/bootstrap.ts'),
@@ -33,7 +33,7 @@ export default defineConfig({
     {
       name: 'bookmarklet-post',
       closeBundle() {
-        const out = resolve(__dirname, 'dist-bookmarklet');
+        const out = resolve(__dirname, 'dist');
         fs.mkdirSync(out, { recursive: true });
         // 拷贝固定宿主页（iframe 的 src，决定存储绑定到的固定源）
         fs.copyFileSync(resolve(__dirname, 'bookmarklet/host.html'), resolve(out, 'host.html'));
