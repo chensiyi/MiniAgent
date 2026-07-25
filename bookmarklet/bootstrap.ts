@@ -13,35 +13,50 @@ const hooksTool = defaultTools.find((t) => t.name === 'hooks');
 const appEl = document.getElementById('app');
 function setBootStatus(text: string): void {
   if (appEl) appEl.textContent = text;
+  else console.warn('[MiniAgent] #app 元素未找到，无法更新状态文字');
 }
 
-try {
-  setBootStatus('MiniAgent 启动中…');
+async function main(): Promise<void> {
+  try {
+    setBootStatus('MiniAgent 启动中…');
+    console.log('[MiniAgent][boot] ① definePreset 前');
 
-  toolManager.definePreset([gmStorageTool, hooksTool!], [gmStorageTool, ...defaultTools, uiTool]);
-  toolManager.bootstrap();
+    toolManager.definePreset([gmStorageTool, hooksTool!], [gmStorageTool, ...defaultTools, uiTool]);
+    console.log('[MiniAgent][boot] ② definePreset 完成，开始 bootstrap()');
 
-  // 暴露全局单例（iframe 自身 window），便于调试 / 运行时编辑
-  (globalThis as unknown as { agent: unknown }).agent = agent;
-  (window as unknown as { MiniAgent: unknown }).MiniAgent = MiniAgent;
+    // ⚠️ 必须await：bootstrap 内部依次调用每个工具的 register()（含 ui→mount DOM），
+    // 不 await 的话后续 setBootStatus 在注册完成前就跑了，且异步异常会被吞掉
+    await toolManager.bootstrap();
+    console.log('[MiniAgent][boot] ③ bootstrap() 完成，UI 应已 mount');
 
-  // ---- 验证：跨站固定存储链路（iframe + CDN + localStorage）----
-  const TEST_KEY = '__boot_test__';
-  const stamp = 'ok@' + Date.now();
-  GM_setValue(TEST_KEY, stamp);
-  const got = GM_getValue(TEST_KEY);
+    // 暴露全局单例（iframe 自身 window），便于调试 / 运行时编辑
+    (globalThis as unknown as { agent: unknown }).agent = agent;
+    (window as unknown as { MiniAgent: unknown }).MiniAgent = MiniAgent;
 
-  setBootStatus('✅ MiniAgent 就绪（' + location.origin + '）');
+    // ---- 验证：跨站固定存储链路（iframe + CDN + localStorage）----
+    const TEST_KEY = '__boot_test__';
+    const stamp = 'ok@' + Date.now();
+    GM_setValue(TEST_KEY, stamp);
+    const got = GM_getValue(TEST_KEY);
 
-  console.log('[MiniAgent] 书签已挂载', {
-    agent: typeof agent,
-    storageTest: got,
-    origin: location.origin,
-  });
-} catch (e) {
-  const msg = e instanceof Error ? e.message : String(e);
-  setBootStatus('❌ MiniAgent 启动失败: ' + msg);
-  console.error('[MiniAgent] bootstrap 异常:', e);
-  // eslint-disable-next-line no-alert
-  alert('MiniAgent 启动失败: ' + msg);
+    const rootEl = document.getElementById('miniagent-root');
+    setBootStatus('✅ MiniAgent 就绪（' + location.origin + '）[root=' + (rootEl ? '有' : '无') + ']');
+
+    console.log('[MiniAgent][boot] ④ 全部完成', {
+      agent: typeof agent,
+      storageTest: got,
+      origin: location.origin,
+      hasRoot: !!rootEl,
+      hasLauncher: !!document.getElementById('miniagent-launcher'),
+      launcherDisplay: document.getElementById('miniagent-launcher')?.style.display,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    setBootStatus('❌ MiniAgent 启动失败: ' + msg);
+    console.error('[MiniAgent][boot] ✗ 异常:', e);
+    // eslint-disable-next-line no-alert
+    alert('MiniAgent 启动失败: ' + msg);
+  }
 }
+
+void main();

@@ -734,31 +734,42 @@
 	var appEl = document.getElementById("app");
 	function setBootStatus(text) {
 		if (appEl) appEl.textContent = text;
+		else console.warn("[MiniAgent] #app 元素未找到，无法更新状态文字");
 	}
-	try {
-		setBootStatus("MiniAgent 启动中…");
-		toolManager.definePreset([gmStorageTool, hooksTool], [
-			gmStorageTool,
-			...defaultTools,
-			uiTool
-		]);
-		toolManager.bootstrap();
-		globalThis.agent = agent;
-		window.MiniAgent = MiniAgent;
-		const TEST_KEY = "__boot_test__";
-		GM_setValue(TEST_KEY, "ok@" + Date.now());
-		const got = GM_getValue(TEST_KEY);
-		setBootStatus("✅ MiniAgent 就绪（" + location.origin + "）");
-		console.log("[MiniAgent] 书签已挂载", {
-			agent: typeof agent,
-			storageTest: got,
-			origin: location.origin
-		});
-	} catch (e) {
-		const msg = e instanceof Error ? e.message : String(e);
-		setBootStatus("❌ MiniAgent 启动失败: " + msg);
-		console.error("[MiniAgent] bootstrap 异常:", e);
-		alert("MiniAgent 启动失败: " + msg);
+	async function main() {
+		try {
+			setBootStatus("MiniAgent 启动中…");
+			console.log("[MiniAgent][boot] ① definePreset 前");
+			toolManager.definePreset([gmStorageTool, hooksTool], [
+				gmStorageTool,
+				...defaultTools,
+				uiTool
+			]);
+			console.log("[MiniAgent][boot] ② definePreset 完成，开始 bootstrap()");
+			await toolManager.bootstrap();
+			console.log("[MiniAgent][boot] ③ bootstrap() 完成，UI 应已 mount");
+			globalThis.agent = agent;
+			window.MiniAgent = MiniAgent;
+			const TEST_KEY = "__boot_test__";
+			GM_setValue(TEST_KEY, "ok@" + Date.now());
+			const got = GM_getValue(TEST_KEY);
+			const rootEl = document.getElementById("miniagent-root");
+			setBootStatus("✅ MiniAgent 就绪（" + location.origin + "）[root=" + (rootEl ? "有" : "无") + "]");
+			console.log("[MiniAgent][boot] ④ 全部完成", {
+				agent: typeof agent,
+				storageTest: got,
+				origin: location.origin,
+				hasRoot: !!rootEl,
+				hasLauncher: !!document.getElementById("miniagent-launcher"),
+				launcherDisplay: document.getElementById("miniagent-launcher")?.style.display
+			});
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : String(e);
+			setBootStatus("❌ MiniAgent 启动失败: " + msg);
+			console.error("[MiniAgent][boot] ✗ 异常:", e);
+			alert("MiniAgent 启动失败: " + msg);
+		}
 	}
+	main();
 	//#endregion
 })();
