@@ -22,7 +22,6 @@ declare global {
     description?: string;
     parameters?: Record<string, unknown>;
     deps?: { name: string; author?: string }[];
-    infra?: boolean; // 基础设施工具（hooks / 存储）：始终在线、不可经开关关闭（仅 tool_manager 读取，executor 忽略）
     hidden?: boolean;
     call?: (args: Record<string, unknown>, ctx: RunCtx) => Promise<string> | string;
     register?: (ctx: RegisterCtx) => void | Promise<void>;
@@ -62,10 +61,10 @@ declare global {
   // 工具生命周期管理器（2026-07-25 从 executor 迁入）：预装宇宙 / bootstrap / 启停 / 重建 全部收归此处。
   // 内核 executor 退化为哑注册表，不关心预装清单与业务启停。
   type ToolManagerApi = {
-    definePreset(tools: ToolDef[]): void; // 宿主层注入预装宇宙（如 [gmStorage, ...defaultTools, ui]）
-    bootstrap(): void; // 启动编排：infra 始终在线 → 其余按 disabledTools 过滤 → 重建用户工具
+    definePreset(baseTools: ToolDef[], allTools: ToolDef[]): void; // 宿主层注入预装宇宙：baseTools 基础能力始终先注册；allTools 完整预装按 disabledTools 过滤
+    bootstrap(): void; // 启动编排：baseTools 先注册 → 镜像存储后读 disabledTools → 过滤注册 allTools → 重建用户工具
     getStates(): ToolState[]; // 完整工具清单（含启用态），供 UI 启停面板渲染
-    setEnabled(name: string, enabled: boolean): Promise<void> | void; // 启停（infra 拒绝关闭）
+    setEnabled(name: string, enabled: boolean): Promise<void> | void; // 启停（baseTools 拒绝关闭）
     deleteTool(name: string): Promise<string>;
   };
 

@@ -90,7 +90,7 @@ function renderToolsPanel(panel: HTMLElement): void {
     cb.onchange = async () => {
       const next = cb.checked;
       await MiniAgent.toolManager.setEnabled(s.name, next);
-      // 禁用被用户拒绝时 setEnabled 未生效（如关闭界面/infra 不可关），复选框还原为实际启用态
+      // 禁用被用户拒绝时 setEnabled 未生效（如关闭界面/baseTools 不可关），复选框还原为实际启用态
       const live = MiniAgent.executor.list(true).some((t) => t.name === s.name);
       if (cb.checked !== live) cb.checked = live;
     };
