@@ -21,7 +21,8 @@ declare global {
     author?: string;
     description?: string;
     parameters?: Record<string, unknown>;
-    deps?: { name: string; author: string }[];
+    deps?: { name: string; author?: string }[];
+    infra?: boolean; // 基础设施工具（hooks / 存储）：始终在线、不可经开关关闭（仅 tool_manager 读取，executor 忽略）
     hidden?: boolean;
     call?: (args: Record<string, unknown>, ctx: RunCtx) => Promise<string> | string;
     register?: (ctx: RegisterCtx) => void | Promise<void>;
@@ -49,16 +50,23 @@ declare global {
     [k: string]: unknown;
   };
 
-  type ToolState = { name: string; author?: string; description?: string; enabled: boolean };
+  type ToolState = { name: string; author?: string; description?: string; enabled: boolean; builtin: boolean };
 
-  // 执行器公开面（环境层 UI / 胶水所需）
+  // 执行器公开面（环境层 UI / 胶水所需）：内核退化为哑注册表，仅保留基础注册/列举/审批能力
   type ExecutorApi = {
     registerAll(tools: ToolDef[]): { registered: string[]; rejected: string[] };
     list(includeAll?: boolean): ToolDef[];
-    allToolStates(): ToolState[];
-    setEnabled(name: string, enabled: boolean): Promise<void> | void;
     requestApproval(call: { name: string; code?: string; riskLevel?: string }, agent: Agent): Promise<boolean>;
-    rehydrateTools(): void;
+  };
+
+  // 工具生命周期管理器（2026-07-25 从 executor 迁入）：预装宇宙 / bootstrap / 启停 / 重建 全部收归此处。
+  // 内核 executor 退化为哑注册表，不关心预装清单与业务启停。
+  type ToolManagerApi = {
+    definePreset(tools: ToolDef[]): void; // 宿主层注入预装宇宙（如 [gmStorage, ...defaultTools, ui]）
+    bootstrap(): void; // 启动编排：infra 始终在线 → 其余按 disabledTools 过滤 → 重建用户工具
+    getStates(): ToolState[]; // 完整工具清单（含启用态），供 UI 启停面板渲染
+    setEnabled(name: string, enabled: boolean): Promise<void> | void; // 启停（infra 拒绝关闭）
+    deleteTool(name: string): Promise<string>;
   };
 
   type Agent = {
@@ -74,8 +82,8 @@ declare global {
   };
 
   // ---- basement IIFE 全局（@require 引入；运行时仅绑定 executor↔agent + 注册内核 hooks，不自动启动其余工具）----
-  // 启动由各环境分支的胶水分段 registerAll 编排：先注册存储工具（镜像外部存储），
-  // 再按 config.disabledTools 注册默认工具 + UI，最后重建用户保存的自编排工具。
+  // 启动编排完全交给 tool_manager：宿主层注入预装宇宙（含环境层工具 gm_storage / ui），由 bootstrap 统一编排；
+  // 依赖关系只活在工具自身 deps 图（hooks ← gm_storage ← ui），由 registerAll 内部拓扑序处理，内核不另设优先级层。
   // 钩子能力（installHook / uninstallToolHooks / wrapHook）不再作为散装全局暴露，
   // 统一经 agent.tools.get('hooks') 取回 HooksTool 后调用（标准 tool 接口，避免框架不清的调用声明）。
   const MiniAgent: {
@@ -83,7 +91,7 @@ declare global {
     executor: ExecutorApi;
     handleToolCommand(text: string): Promise<void>;
     defaultTools: ToolDef[];
-    extraBuiltinTools: ToolDef[];
+    toolManager: ToolManagerApi;
   };
 
   // hooks 工具对象类型：经 agent.tools.get('hooks') 取回后强转使用（标准 tool 接口）。

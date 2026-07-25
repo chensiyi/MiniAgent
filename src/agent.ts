@@ -4,20 +4,14 @@ import { uiTool } from './tools/ui';
 import { gmStorageTool } from './tools/gm_storage';
 
 // 消费经 @require 引入的 basement 全局（运行时仅绑定 executor↔agent，IIFE 已注册内核 hooks；不自动启动其余工具）。
-const { agent, executor, defaultTools, extraBuiltinTools } = MiniAgent;
+// 启动编排完全交给 tool_manager：注入预装宇宙（含环境层工具 gm_storage / ui），由 bootstrap 统一编排。
+//  - 依赖关系只活在工具自身 deps 图（hooks ← gm_storage ← ui），由 registerAll 内部拓扑序处理，内核不另设优先级层；
+//  - infra 工具（hooks 已在 IIFE 注册、gm_storage 为存储底座）始终在线、不可经开关关闭；
+//  - 其余预装项按 config.disabledTools 过滤；最后重建用户持久化工具（运行期创建并持久化的工具）。
+const { agent, toolManager, defaultTools } = MiniAgent;
 
-// 显式分段注册（dev 编排启动过程）：
-// ① 先注册 gm_storage：其 register 把 GM_* 镜像进内存 Map（此后 agent.config 才是真实持久化值）。
-// ② 再按 config.disabledTools 过滤注册默认工具 + UI（依赖 hooks 已就绪、config 已镜像）。
-// ③ 重建用户保存的自编排工具（运行期创建并持久化的工具）。
-// 用户钩子为内存级临时调试对象，不持久化、不重建（设计如此）。
-executor.registerAll([gmStorageTool]); // ① 镜像 GM_*（register 内完成）
-const disabled = new Set(agent.config.disabledTools ?? []);
-const builtins = [...defaultTools, ...extraBuiltinTools].filter(
-  (t) => !disabled.has(t.name) && t.name !== 'hooks', // hooks 已由 IIFE 注册，排除避免重复
-);
-executor.registerAll([...builtins, uiTool]); // ② 默认工具（剔除黑名单）+ UI（经 deps:[gm_storage] 排在其后）
-executor.rehydrateTools(); // ③ 重建用户保存的自编排工具
+toolManager.definePreset([gmStorageTool, ...defaultTools, uiTool]); // 注入预装宇宙：存储底座 + 内置工具 + 环境层 UI
+toolManager.bootstrap(); // 启动编排（infra 在线 → 按 disabledTools 过滤 → 重建用户工具）
 
 // 暴露全局单例（标准用户脚本空间：沙箱内 globalThis，便于运行时 / LLM 动态编辑）
 (globalThis as unknown as { agent: Agent }).agent = agent;

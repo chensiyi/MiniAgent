@@ -76,10 +76,10 @@ const STYLE = `
 .ma-collapsed .ma-bubbles,.ma-collapsed .ma-input-row,.ma-collapsed .ma-tools-panel{display:none}
 `;
 
-// 工具启停面板：读 executor.allToolStates()，每行开关调 setEnabled（即时生效+持久化，§3）
+// 工具启停面板：读 toolManager.getStates()（以 preset 宇宙为真相源，含已注册/关闭/用户工具），每行开关调 setEnabled（即时生效+持久化）
 function renderToolsPanel(panel: HTMLElement): void {
   panel.replaceChildren();
-  for (const s of MiniAgent.executor.allToolStates()) {
+  for (const s of MiniAgent.toolManager.getStates()) {
     const row = document.createElement('label'); row.className = 'ma-tool-row';
     const name = document.createElement('span'); name.className = 'ma-tool-name';
     name.textContent = s.author && s.author !== 'sys' ? `${s.name} @${s.author}` : s.name;
@@ -89,8 +89,8 @@ function renderToolsPanel(panel: HTMLElement): void {
     const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = s.enabled;
     cb.onchange = async () => {
       const next = cb.checked;
-      await MiniAgent.executor.setEnabled(s.name, next);
-      // 禁用被用户拒绝时 setEnabled 未生效（如关闭界面），复选框还原为实际启用态
+      await MiniAgent.toolManager.setEnabled(s.name, next);
+      // 禁用被用户拒绝时 setEnabled 未生效（如关闭界面/infra 不可关），复选框还原为实际启用态
       const live = MiniAgent.executor.list(true).some((t) => t.name === s.name);
       if (cb.checked !== live) cb.checked = live;
     };
@@ -415,7 +415,7 @@ function ensureLauncher(): HTMLElement {
   (document.head ?? document.documentElement).append(style);
   const el = document.createElement('div'); el.id = 'miniagent-launcher';
   el.innerHTML = '<button type="button" title="启用 MiniAgent 界面">💬 启用界面</button>';
-  (el.querySelector('button') as HTMLButtonElement).onclick = () => { void MiniAgent.executor.setEnabled('ui', true); };
+  (el.querySelector('button') as HTMLButtonElement).onclick = () => { void MiniAgent.toolManager.setEnabled('ui', true); };
   if (document.body) document.body.append(el);
   else document.addEventListener('DOMContentLoaded', () => document.body.append(el), { once: true });
   launcherEl = el;

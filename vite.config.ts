@@ -32,7 +32,7 @@ const updateURL = 'http://localhost:4173/miniagent.user.js';
 // ---- basement 核心经 @require 引入（当前版本，jsDelivr 按 tag 分发）----
 // 本地开发可设 MINIAGENT_BASEMENT_URL 指向本地静态服务器（如 http://localhost:4174/miniagent-basement.js），
 // 免去每次改 basement 后重新发 tag。产物需先在 basement 分支 `npm run build` 产出 dist/miniagent-basement.js。
-const basementVersion = '0.2.4';
+const basementVersion = '0.2.5';
 const basementUrl =
   process.env.MINIAGENT_BASEMENT_URL ??
   `https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@basement-${basementVersion}/dist/miniagent-basement.js`;
@@ -58,7 +58,8 @@ export default defineConfig({
         ],
         connect: ['*'], // 直连 LLM 域名（动态）；后续脚本管理可收敛
         // basement 核心经 @require 引入（当前版本，jsDelivr 按 tag 分发）：运行时仅绑定 executor↔agent + 注册内核 hooks，不自动启动其余工具；
-        // 启动由各环境分支胶水分段 registerAll 编排（先镜像 GM_*，再注册默认工具 + UI），不打包任何核心源码。
+        // 启动编排交给 tool_manager：宿主注入预装宇宙（[gmStorage, ...defaultTools, ui]）后调用 bootstrap 统一编排（infra 在线 → disabledTools 过滤 → 重建用户工具），
+        // 依赖仅活在工具自身 deps 图（hooks ← gm_storage ← ui），内核退化为哑注册表，不打包任何核心源码。
         require: [
           basementUrl,
           // 核心渲染库经 @require 引入：安装期由 Tampermonkey 拉取并缓存（一次），运行时直接读隔离世界全局。

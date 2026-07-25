@@ -29,12 +29,14 @@ let mirrored = false;
 // 落盘能力（核心职责）：storage 本身是「内存 Map + CRUD」，不含任何 GM_* 写入；
 // 本工具在 register 时把 GM_* 一次性镜像进内存 Map，并包裹 storage.set / storage.del
 // 装上 GM 落盘 before 钩子，使一切 storage 写操作透明落盘——其它工具只管读 storage，无需关心运行环境。
-// 本工具仅负责「镜像 + 落盘」，不触发任何核心启动（启动由 dev 胶水分段 registerAll 编排）。
+// 本工具仅负责「镜像 + 落盘」，不触发任何核心启动（启动由 dev 经 tool_manager.bootstrap 统一编排）。
 // before 阶段落盘：若 GM 写入抛错（如配额超限），base（内存写入）被跳过，原方法不执行
 // （hooks 契约：before 钩子抛错 → 不执行 base，见 hooks.ts wrapHook）。
 export const gmStorageTool: ToolDef = {
   name: 'gm_storage',
   author: 'sys',
+  infra: true, // 存储底座：始终在线，不可经开关关闭（关闭会导致配置/记忆全部丢失）
+  deps: [{ name: 'hooks', author: 'sys' }], // 依赖 hooks（已 IIFE 注册的内核）；拓扑序保证 hooks 先于本工具
   description: '统一的持久存储管理（默认 memory 命名空间，可指定其它 ns）。action 取值：get=读取键；set=写入键（update=true 时合并已有对象）；list=列出键（给定 ns 列该分区子键，不给 ns 按 session/tools/code/memory 分区概览）；del=删除键（不可恢复，删除前会请求确认）。用于记忆、配置、状态管理。底层 storage 为内存 Map，本工具经 before 钩子透明落盘到 GM_*，其它工具无需关心环境。',
   parameters: {
     type: 'object',
@@ -62,7 +64,7 @@ export const gmStorageTool: ToolDef = {
     additionalProperties: false,
   },
   // 注册 = 安装落盘机制：确保内存镜像就绪 + 取回 hooks + 包裹 storage.set/del + 装 GM 落盘 before 钩子。
-  // 本工具只负责「镜像 + 落盘」，不触发任何核心启动（启动由 dev 胶水分段 registerAll 编排）。
+  // 本工具只负责「镜像 + 落盘」，不触发任何核心启动（启动由 dev 经 tool_manager.bootstrap 统一编排）。
   register(ctx): void {
     // 启动期把 GM_* 一次性镜像进内存 Map（幂等；纯内存 Storage 不含 load，由环境层在此完成）。
     if (!mirrored) {
