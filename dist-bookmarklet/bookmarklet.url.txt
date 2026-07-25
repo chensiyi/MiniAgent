@@ -1,0 +1,1 @@
+javascript:(function(){var f=document.createElement("iframe");f.src="https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@bookmarklet/dist-bookmarklet/host.html";f.style.cssText="position:fixed;top:0;right:0;width:380px;height:100%;border:0;z-index:2147483647";document.body.appendChild(f);})()
