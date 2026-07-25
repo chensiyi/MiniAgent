@@ -1,1 +1,0 @@
-javascript:(function(){var f=document.createElement("iframe");f.src="https://chensiyi.github.io/MiniAgent/host.html";f.style.cssText="position:fixed;top:0;right:0;width:380px;height:100%;border:0;z-index:2147483647";document.body.appendChild(f);})()
