@@ -36,11 +36,15 @@ export default defineConfig({
         const out = resolve(__dirname, 'dist');
         fs.mkdirSync(out, { recursive: true });
         // 拷贝固定宿主页（iframe 的 src，决定存储绑定到的固定源）
-        fs.copyFileSync(resolve(__dirname, 'bookmarklet/host.html'), resolve(out, 'host.html'));
+        // 同时注入 cache-buster（?v=时间戳），绕过 jsDelivr 7天 CDN 缓存
+        const v = '?v=' + Date.now();
+        let html = fs.readFileSync(resolve(__dirname, 'bookmarklet/host.html'), 'utf-8');
+        html = html.replace(/bookmarklet\.js(\s*["'>])/g, 'bookmarklet.js' + v + '$1');
+        fs.writeFileSync(resolve(out, 'host.html'), html);
         // 同时输出到 docs/，供 GitHub Pages（源 = bookmarklet 分支 + /docs）以站点根提供 text/html
         const docs = resolve(__dirname, 'docs');
         fs.mkdirSync(docs, { recursive: true });
-        fs.copyFileSync(resolve(__dirname, 'bookmarklet/host.html'), resolve(docs, 'host.html'));
+        fs.writeFileSync(resolve(docs, 'host.html'), html);
         // 生成 javascript: 加载器（创建指向 host.html 的 iframe）
         const loader =
           'javascript:(function(){var f=document.createElement("iframe");' +
