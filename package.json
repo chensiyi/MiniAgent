@@ -8,6 +8,8 @@
     "dev": "vite",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
+    "build:bookmarklet": "vite build",
+    "serve:bookmarklet": "vite preview --outDir dist-bookmarklet --port 5174 --strictPort",
     "test": "vite build --mode test && vite preview"
   },
   "devDependencies": {
