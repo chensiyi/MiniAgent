@@ -7,13 +7,16 @@
 
 ## 一键安装（添加书签）
 
-点击下方链接，打开后**全选复制**其内容，再到浏览器书签栏「添加书签」、把网址粘贴进去即可：
+书签的本质，是把下面这段 `javascript:` 启动器放进书签的**地址栏（位置字段）**：
+
+1. 打开启动器文件，**全选复制其中的 `javascript:` 代码**：
 
 ➡️ **[📌 获取 MiniAgent 书签](https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@bookmarklet/dist/bookmarklet.url.txt)**
 
-- 书签内容是一段 `javascript:` 启动器，点击即在当前页右下角拉起浮窗。
-- 部分浏览器支持**直接把该链接拖到书签栏**完成添加。
+2. 在浏览器书签栏右键「添加网页 / 添加书签」，名称随意，**把刚才复制的代码粘进「地址 / 位置」那一栏**（它是以 `javascript:` 开头的脚本，不是普通网址）。
+3. 以后在任意网页点这个书签，即在右下角拉起浮窗。
 - 书签启动器走 jsDelivr CDN（`@bookmarklet` 分发）；GitHub Pages 只托管 `host.html` 浮窗宿主页（域名 `chensiyi.github.io/MiniAgent/host.html`），不托管 `dist/`。本地取用：仓库 `dist/bookmarklet.url.txt`。
+- ⚠️ 直接把上面的 https 链接拖到书签栏，只会存成一个「打开该文本文件」的普通书签、不会运行。必须按第 2 步把 `javascript:` 代码粘进书签的地址栏才行。
 
 ## 使用
 
