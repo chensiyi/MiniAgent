@@ -31,7 +31,7 @@
 ## 4. 安装
 
 1. 浏览器装好 **Tampermonkey** 或 **Violentmonkey** 扩展。
-2. 打开安装直链（点击即触发扩展安装）：[`miniagent.user.js`](https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@tampermonkey/dist/miniagent.user.js)（jsDelivr CDN，与脚本自动更新同源）。
+2. 打开安装直链（点击即触发扩展安装）：[`miniagent.user.js`](https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@tampermonkey0.2.2/dist/miniagent.user.js)（jsDelivr CDN，与脚本自动更新同源）。
 3. 扩展提示「是否安装」→ 确认。脚本会自动从 jsDelivr 拉取核心并启用更新检查。
 
 > 不想装扩展？可用 **bookmarklet 分支** 的「拖书签即用」形态（功能相同，但存储按站点分区、无跨站统一）。

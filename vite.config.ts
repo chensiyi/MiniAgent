@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 import monkey from 'vite-plugin-monkey';
 import fs from 'fs';
+import { execFileSync } from 'child_process';
 
 // 调试态（unsafeWindow 授予 + 挂主世界）由"运行环境"决定，而非 git 分支：
 // - `npm run dev`（vite serve）：授予 unsafeWindow，HMR 热更 + DevTools 控制台直调 agent；
@@ -26,6 +27,22 @@ const basementUrl =
   process.env.MINIAGENT_BASEMENT_URL ??
   `https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@basement-${basementVersion}/dist/miniagent-basement.js`;
 
+// ---- 发布更新源：production 构建指向"当前分支最新发布 tag"（immutable，避分支引用缓存陈旧构建）----
+// 每次 build 自动取最新 tag；首次发版前无 tag 时回退到 tampermonkey 分支引用。
+const releaseTagPrefix = 'tampermonkey';
+const releaseTag = (() => {
+  try {
+    const out = execFileSync('git', ['tag', '--list', `${releaseTagPrefix}*`, '--sort=-version:refname'], {
+      encoding: 'utf-8',
+    }).trim();
+    const tags = out.split('\n').map((t) => t.trim()).filter(Boolean);
+    return tags[0] || releaseTagPrefix;
+  } catch {
+    return releaseTagPrefix;
+  }
+})();
+const releaseUpdateURL = `https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@${releaseTag}/dist/miniagent.user.js`;
+
 // MiniAgent 构建配置（极简版）：纯原生 TS + 手写 DOM，无 React / antd / langchain / 任何框架
 // markdown 渲染交给外部引入的 marked / DOMPurify：通过 @require 在安装期由 Tampermonkey 拉取并缓存
 export default defineConfig(async ({ mode, command }) => {
@@ -35,7 +52,7 @@ export default defineConfig(async ({ mode, command }) => {
   // 注意：发布源依赖 tampermonkey 分支的 dist/ 已 `git add -f` 入库并推送（同 basement 的发布策略），否则该 CDN 地址会 404。
   const updateURL =
     mode === 'production'
-      ? 'https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@tampermonkey/dist/miniagent.user.js'
+      ? releaseUpdateURL
       : 'http://localhost:4173/miniagent.user.js';
   return {
     plugins: [

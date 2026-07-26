@@ -6,7 +6,7 @@
   "description": "MiniAgent —— 极简 userScript 智能体（原生 DOM + GM_xmlhttpRequest 桥接 LLM，无框架）",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "node scripts/sync-readme-tag.mjs && vite build",
     "typecheck": "tsc --noEmit",
     "test": "vite build --mode test && vite preview"
   },
