@@ -21,8 +21,8 @@
 	}
 	var STYLE = `
 :root{--brand:#378DDD;--brand-soft:rgba(55,141,221,.22);--glass:rgba(18,26,44,.52);--glass-strong:rgba(22,31,52,.66);--glass-border:rgba(255,255,255,.16);--glass-border-strong:rgba(255,255,255,.26);--text:#eef2ff;--text-dim:rgba(238,242,255,.62);--risk-high:#fb923c}
-#miniagent-root{position:relative;z-index:2147483647;width:100%;height:100%;display:flex;flex-direction:column;gap:8px;font:14px system-ui;color:var(--text);pointer-events:auto}
-.ma-bubbles{flex:1 1 auto;min-height:0;overflow-y:auto;display:flex;flex-direction:column;justify-content:flex-end;gap:6px;padding:4px 2px;order:1;-webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 10%,#000 100%);mask-image:linear-gradient(to bottom,transparent 0,#000 10%,#000 100%)}
+#miniagent-root{position:relative;z-index:2147483647;width:100%;height:100%;display:flex;flex-direction:column;justify-content:flex-end;gap:8px;font:14px system-ui;color:var(--text);pointer-events:auto}
+.ma-bubbles{flex:0 1 auto;min-height:0;max-height:320px;overflow-y:auto;display:flex;flex-direction:column;justify-content:flex-end;gap:6px;padding:4px 2px;order:2;-webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 10%,#000 100%);mask-image:linear-gradient(to bottom,transparent 0,#000 10%,#000 100%)}
 .ma-bubble{padding:6px 9px;max-width:88%;white-space:pre-wrap;word-break:break-word;border:1px solid var(--glass-border);background:var(--glass);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);box-shadow:0 2px 10px rgba(0,0,0,.18);align-self:flex-start}
 .ma-bubble.user{align-self:flex-end;background:var(--brand-soft);border-color:rgba(55,141,221,.5)}
 .ma-bubble.tool{align-self:flex-start;font-size:12px;background:rgba(18,26,44,.62)}
@@ -63,7 +63,7 @@
 .ma-md-content th,.ma-md-content td{border:1px solid var(--glass-border);padding:2px 6px}
 .ma-md-content hr{border:0;border-top:1px solid var(--glass-border);margin:8px 0}
 .ma-md-content a{color:#6fb0f0}
-.ma-toggle{display:block;width:100%;padding:2px 0;margin:0;text-align:center;border:1px solid var(--glass-border);background:var(--glass);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);color:var(--text);cursor:pointer;font-size:11px;line-height:1.3;order:2}
+.ma-toggle{display:block;width:100%;padding:2px 0;margin:0;text-align:center;border:1px solid var(--glass-border);background:var(--glass);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);color:var(--text);cursor:pointer;font-size:11px;line-height:1.3;order:1}
 .ma-toggle:hover{background:rgba(255,255,255,.16)}
 .ma-collapsed{justify-content:flex-end}
 .ma-collapsed .ma-bubbles,.ma-collapsed .ma-input-row,.ma-collapsed .ma-tools-panel{display:none}
