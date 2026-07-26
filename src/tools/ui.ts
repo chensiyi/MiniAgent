@@ -448,7 +448,23 @@ function ensureLauncher(): HTMLElement {
   (document.head ?? document.documentElement).append(style);
   const el = document.createElement('div'); el.id = 'miniagent-launcher';
   el.innerHTML = '<button type="button" title="启用 MiniAgent 界面">💬 启用界面</button>';
-  (el.querySelector('button') as HTMLButtonElement).onclick = () => { void MiniAgent.toolManager.setEnabled('ui', true); };
+  (el.querySelector('button') as HTMLButtonElement).onclick = async () => {
+    console.log('[MiniAgent] 启用界面按钮被点击');
+    try {
+      if (MiniAgent.toolManager && typeof MiniAgent.toolManager.setEnabled === 'function') {
+        await MiniAgent.toolManager.setEnabled('ui', true);
+      } else {
+        console.warn('[MiniAgent] toolManager.setEnabled 不可用，fallback 直接注册 uiTool');
+        const set = new Set(MiniAgent.agent.config.disabledTools ?? []);
+        set.delete('ui');
+        MiniAgent.agent.config.disabledTools = [...set];
+        MiniAgent.executor.registerAll([uiTool]);
+      }
+      console.log('[MiniAgent] 启用界面流程完成');
+    } catch (e) {
+      console.error('[MiniAgent] 启用界面失败:', e);
+    }
+  };
   if (document.body) document.body.append(el);
   else document.addEventListener('DOMContentLoaded', () => document.body.append(el), { once: true });
   launcherEl = el;
