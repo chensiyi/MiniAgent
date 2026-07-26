@@ -10,18 +10,22 @@
         margin: 0;
         height: 100%;
         font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-        background: #0f1115;
+        background: transparent;
         color: #e6e6e6;
       }
+      body {
+        overflow: hidden;
+      }
       #app {
-        padding: 12px;
-        font-size: 13px;
-        opacity: 0.7;
+        display: none;
       }
     </style>
   </head>
   <body>
-    <div id="app">MiniAgent 加载中…</div>
+    <!-- 浮层探测：iframe 一旦被宿主页允许加载（frame-src 未拦截），立即通知父页。
+         仅用于「当前站点是否宽松」的探测，先于 basement 加载，不依赖任何外部资源。 -->
+    <script>try{parent.postMessage({type:'ma:frame-ok'},'*');}catch(e){}</script>
+    <div id="app"></div>
 
     <!-- 顺序保证：basement 核心 + 渲染库先于 bookmarklet.js 就绪。
          MiniAgent 全局由 basement IIFE 写入 window，故 bookmarklet.js 顶层可安全消费。
@@ -30,6 +34,6 @@
     <script src="https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@basement-0.2.6/dist/miniagent-basement.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
-    <script src="http://localhost:5174/bookmarklet.js?v=2026072604"></script>
+    <script src="https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@bookmarklet0.2.1/dist/bookmarklet.js?v=1785073990493"></script>
   </body>
 </html>

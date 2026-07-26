@@ -15,11 +15,11 @@
 
 1. 打开启动器文件，**全选复制其中的 `javascript:` 代码**：
 
-➡️ **[📌 获取 MiniAgent 书签](https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@bookmarklet/dist/bookmarklet.url.txt)**
+➡️ **[📌 获取 MiniAgent 书签](https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@bookmarklet0.2.1/dist/bookmarklet.url.txt)**
 
 2. 在浏览器书签栏右键「添加网页 / 添加书签」，名称随意，**把刚才复制的代码粘进「地址 / 位置」那一栏**（它是以 `javascript:` 开头的脚本，不是普通网址）。
 3. 以后在任意网页点这个书签，即在右下角拉起浮窗。
-- 书签启动器走 jsDelivr CDN（`@bookmarklet` 分发）；GitHub Pages 只托管 `host.html` 浮窗宿主页（域名 `chensiyi.github.io/MiniAgent/host.html`），不托管 `dist/`。本地取用：仓库 `dist/bookmarklet.url.txt`。
+- 书签启动器走 jsDelivr CDN（按 `vite.config.ts` 的 `bookmarkletVersion` 常量指向 `@bookmarkletX.Y.Z` tag，immutable 不受分支缓存影响）；GitHub Pages 只托管 `host.html` 浮窗宿主页（域名 `chensiyi.github.io/MiniAgent/host.html`），不托管 `dist/`。本地取用：仓库 `dist/bookmarklet.url.txt`。
 - ⚠️ 直接把上面的 https 链接拖到书签栏，只会存成一个「打开该文本文件」的普通书签、不会运行。必须按第 2 步把 `javascript:` 代码粘进书签的地址栏才行。
 
 ## 使用
@@ -64,12 +64,14 @@ MiniAgent/ (bookmarklet 分支)
 
 jsDelivr 按 git tag 分发 `dist/` 与 `docs/host.html`，而 `dist/` 被 `.gitignore` 忽略，须强制入库才能进 tag：
 
+> ⚠️ 发版前置：先把 `vite.config.ts` 的 `bookmarkletVersion` 常量 bump 成本次 tag 名（如 `bookmarklet0.2.1`），否则 `host.html` 仍指向旧 tag / 浮动分支。
+
 ```bash
 npm run build                              # 产出 CDN 版 dist/ + 注入生成 docs/index.html（勿用 test 模式）
 git add -f dist docs/host.html docs/index.html docs/index.template.html README.md docs/bookmarklet-storage.md scripts
 git commit -m "release: vX.Y.Z"
 git tag bookmarkletX.Y.Z
-git push origin bookmarklet --tags        # jsDelivr @bookmarklet 即生效，GitHub Pages 同步首页
+git push origin bookmarklet --tags        # jsDelivr @bookmarkletX.Y.Z 即生效，GitHub Pages 同步首页
 ```
 
 > ⚠️ 工作区 `npm run test` 产出的 `dist/` 指向 `localhost:5174`，**不可直接发版**——发版前务必先 `npm run build` 覆盖。

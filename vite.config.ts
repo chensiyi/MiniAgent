@@ -1,6 +1,6 @@
 // bookmarklet 分支专用构建配置（产出独立 IIFE + 宿主页 + javascript: 加载器）。
 // 两种模式唯一区别：一组地址。
-//   - 生产（npm run build，默认）：bookmarklet.js 走 jsDelivr @bookmarklet（dist/），宿主页走 GitHub Pages；发 tag 时 dist/ 一并入库供 CDN 拉取。
+//   - 生产（npm run build，默认）：bookmarklet.js 走 jsDelivr @<bookmarkletVersion> tag（dist/，immutable 不受分支缓存 TTL 影响），宿主页走 GitHub Pages；发 tag 时 dist/ 一并入库供 CDN 拉取。
 //   - test（npm run test）：bookmarklet.js 与宿主页都走本地 http://localhost:5174，改代码无需推 CDN 即可见效。
 import { defineConfig } from 'vite';
 import { resolve } from 'path';
@@ -9,12 +9,15 @@ import fs from 'fs';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
-const CDN_BASE = 'https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@bookmarklet/dist';
+// 书签版分发 tag：jsDelivr 按 git tag 取 immutable 内容，避免 @bookmarklet 浮动分支的服务端缓存旧包。
+// 每次发版须同步 bump 此常量，且 git tag 名与之对齐（如 bookmarklet0.2.1）。
+const bookmarkletVersion = 'bookmarklet0.2.1';
+const CDN_BASE = 'https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@' + bookmarkletVersion + '/dist';
 const PAGES_HOST = 'https://chensiyi.github.io/MiniAgent/host.html';
 const LOCAL_HOST = 'http://localhost:5174/host.html';
 const LOCAL_JS = 'http://localhost:5174/bookmarklet.js';
 const CDN_JS_MARKER =
-  'https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@bookmarklet/dist/bookmarklet.js?v=2026072604';
+  'https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@' + bookmarkletVersion + '/dist/bookmarklet.js?v=2026072604';
 
 export default defineConfig(({ mode }) => {
   const test = mode === 'test';
