@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "node scripts/sync-readme-tag.mjs && vite build",
+    "build:raw": "node scripts/sync-readme-tag.mjs && vite build --mode raw",
     "typecheck": "tsc --noEmit",
     "test": "vite build --mode test && vite preview"
   },
