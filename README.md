@@ -9,11 +9,11 @@
 
 点击下方链接，打开后**全选复制**其内容，再到浏览器书签栏「添加书签」、把网址粘贴进去即可：
 
-➡️ **[📌 获取 MiniAgent 书签](https://chensiyi.github.io/MiniAgent/dist/bookmarklet.url.txt)**
+➡️ **[📌 获取 MiniAgent 书签](https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@bookmarklet/dist/bookmarklet.url.txt)**
 
 - 书签内容是一段 `javascript:` 启动器，点击即在当前页右下角拉起浮窗。
 - 部分浏览器支持**直接把该链接拖到书签栏**完成添加。
-- 本地取用：仓库同路径 `dist/bookmarklet.url.txt`；CDN 经 jsDelivr `@bookmarklet` 分发。
+- 书签启动器走 jsDelivr CDN（`@bookmarklet` 分发）；GitHub Pages 只托管 `host.html` 浮窗宿主页（域名 `chensiyi.github.io/MiniAgent/host.html`），不托管 `dist/`。本地取用：仓库 `dist/bookmarklet.url.txt`。
 
 ## 使用
 
@@ -59,7 +59,7 @@ jsDelivr 按 git tag 分发 `dist/` 与 `docs/host.html`，而 `dist/` 被 `.git
 npm run build                              # 产出 CDN 版 dist/（勿用 test 模式）
 git add -f dist docs/host.html README.md docs/bookmarklet-storage.md
 git commit -m "release: vX.Y.Z"
-git tag vX.Y.Z
+git tag bookmarkletX.Y.Z
 git push origin bookmarklet --tags        # jsDelivr @bookmarklet 即生效
 ```
 
