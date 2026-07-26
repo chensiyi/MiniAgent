@@ -31,11 +31,11 @@ const basementUrl =
 export default defineConfig(async ({ mode, command }) => {
   // 调试态：本地 dev（serve）或 test 构建授予 unsafeWindow；production 构建保持标准用户脚本空间
   const isDebug = command === 'serve' || mode === 'test';
-  // 更新源：production 构建指向 CDN（jsDelivr 按 dev 分支分发产物）；本地 dev / test 走 localhost:4173 preview
-  // 注意：发布源依赖 dev 分支的 dist/ 已 `git add -f` 入库并推送（同 basement 的发布策略），否则该 CDN 地址会 404。
+  // 更新源：production 构建指向 CDN（jsDelivr 按 tampermonkey 分支分发产物，tampermonkey 为主分支）；本地 dev / test 走 localhost:4173 preview
+  // 注意：发布源依赖 tampermonkey 分支的 dist/ 已 `git add -f` 入库并推送（同 basement 的发布策略），否则该 CDN 地址会 404。
   const updateURL =
     mode === 'production'
-      ? 'https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@dev/dist/miniagent.user.js'
+      ? 'https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@tampermonkey/dist/miniagent.user.js'
       : 'http://localhost:4173/miniagent.user.js';
   return {
     plugins: [
