@@ -1,6 +1,6 @@
 {
   "name": "miniagent",
-  "version": "0.2.0",
+  "version": "0.2.7",
   "private": true,
   "type": "module",
   "description": "MiniAgent —— 极简智能体核心（环境无关：引擎 + 工具 + 内存存储，无 UI / 无持久化 / 无油猴 API；油猴插件与浏览器标签分支经 @require 在其上叠加运行环境）",
