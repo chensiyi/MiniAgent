@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MiniAgent
 // @namespace    https://github.com/chensiyi/MiniAgent
-// @version      0.2.0.20260727001517
+// @version      0.2.7.20260727005635
 // @description  极简 userScript 智能体（原生 DOM + GM 桥接 LLM；核心经 @require 引入 basement 全局 MiniAgent）
 // @downloadURL  https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@tampermonkey/dist/miniagent.user.js
 // @updateURL    https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@tampermonkey/dist/miniagent.user.js
@@ -720,8 +720,7 @@
 		}
 	};
 	var { agent, toolManager, defaultTools } = MiniAgent;
-	var hooksTool = defaultTools.find((t) => t.name === "hooks");
-	toolManager.definePreset([gmStorageTool, hooksTool], [
+	toolManager.definePreset([
 		gmStorageTool,
 		...defaultTools,
 		uiTool
