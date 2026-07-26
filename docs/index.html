@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MiniAgent 书签版 · 安装</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(1200px 600px at 70% -10%, #1b2a4a 0%, #0b0e16 60%);
+    color: #e7ecf3; font: 15px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+  }
+  .card {
+    width: min(640px, 92vw); margin: 32px 0; padding: 28px 30px;
+    background: rgba(20,24,34,.72); border: 1px solid rgba(255,255,255,.12);
+    border-radius: 16px; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    box-shadow: 0 18px 60px rgba(0,0,0,.45);
+  }
+  h1 { margin: 0 0 6px; font-size: 24px; letter-spacing: .3px; }
+  h2 { margin: 22px 0 8px; font-size: 16px; color: #aab6c8; }
+  .lead { margin: 0 0 18px; color: #c4cddd; }
+  .bm-btn {
+    display: inline-block; padding: 14px 22px; border-radius: 12px;
+    background: linear-gradient(180deg,#3b82f6,#2563eb); color: #fff; font-weight: 700; font-size: 17px;
+    text-decoration: none; cursor: grab; user-select: none; box-shadow: 0 8px 22px rgba(37,99,235,.45);
+    border: 1px solid rgba(255,255,255,.25);
+  }
+  .bm-btn:active { cursor: grabbing; }
+  .hint { margin: 16px 0 0; color: #aeb9cb; font-size: 14px; }
+  .copy-btn {
+    margin-left: 6px; padding: 4px 12px; border-radius: 8px; cursor: pointer;
+    background: rgba(255,255,255,.1); color: #e7ecf3; border: 1px solid rgba(255,255,255,.2); font-size: 13px;
+  }
+  .copied { margin-left: 8px; color: #4ade80; font-size: 13px; }
+  hr { border: none; border-top: 1px solid rgba(255,255,255,.12); margin: 22px 0; }
+  ul { margin: 6px 0; padding-left: 20px; }
+  li { margin: 6px 0; }
+  a { color: #6cb2ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { background: rgba(255,255,255,.1); padding: 1px 5px; border-radius: 5px; font-size: 13px; }
+  .note { margin: 16px 0 0; font-size: 13px; color: #d8b46a; background: rgba(216,180,106,.1); border: 1px solid rgba(216,180,106,.3); padding: 10px 12px; border-radius: 10px; }
+</style>
+</head>
+<body>
+  <main class="card">
+    <h1>MiniAgent 书签版</h1>
+    <p class="lead">把下面这个按钮<strong>拖到浏览器书签栏</strong>，以后在任意网页点一下，就能在右下角拉起 AI 浮窗。</p>
+
+    <a class="bm-btn" href="javascript:(function(){var MA_ID=&quot;miniagent-iframe&quot;;if(window.__maUnsupported) return;var f=document.getElementById(MA_ID);if(f &amp;&amp; f.style.display!==&quot;none&quot;){ f.style.display=&quot;none&quot;; return; }if(f &amp;&amp; f.style.display===&quot;none&quot;){ f.style.display=&quot;&quot;; return; }if(document.getElementById(&quot;miniagent-csp-tip&quot;)) return;var all=document.querySelectorAll(&quot;iframe&quot;);for(var i=0;i&lt;all.length;i++){var s=all[i].src||&quot;&quot;;if(s.indexOf(&quot;host.html&quot;)!==-1)all[i].remove();}f=document.createElement(&quot;iframe&quot;);f.id=MA_ID;f.src=&quot;https://chensiyi.github.io/MiniAgent/host.html?v=1785071361764&quot;;f.style.cssText=&quot;position:fixed;right:16px;bottom:16px;width:360px;height:480px;border:0;z-index:2147483647;background:transparent;overflow:hidden&quot;;document.body.appendChild(f);window.__maIframe=f;var framed=false;function showTip(){  if(window.__maUnsupported || framed) return;  window.__maUnsupported=true;  if(f&amp;&amp;f.parentNode) f.parentNode.removeChild(f);  var t=document.createElement(&quot;div&quot;);  t.id=&quot;miniagent-csp-tip&quot;;  t.style.cssText=&quot;position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:2147483647;background:#1f1f1f;color:#fff;padding:10px 14px;border-radius:8px;font:13px system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.3);max-width:80vw;cursor:default&quot;;  var msg=document.createTextNode(&quot;当前站点禁止加载浮层（严格 CSP），请使用 &quot;);  var a=document.createElement(&quot;a&quot;);  a.href=&quot;https://github.com/chensiyi/MiniAgent/tree/tampermonkey&quot;;  a.target=&quot;_blank&quot;; a.rel=&quot;noopener&quot;; a.textContent=&quot;油猴脚本版&quot;;  a.style.color=&quot;#4ea1ff&quot;; a.style.textDecoration=&quot;underline&quot;;  t.appendChild(msg); t.appendChild(a);  var timer=setTimeout(function(){ if(t.parentNode) t.remove(); }, 8000);  t.addEventListener(&quot;mouseenter&quot;,function(){ clearTimeout(timer); });  t.addEventListener(&quot;mouseleave&quot;,function(){ timer=setTimeout(function(){ if(t.parentNode) t.remove(); }, 8000); });  document.body.appendChild(t);}if(!window.__maMsgBound){window.__maMsgBound=true;window.addEventListener(&quot;message&quot;,function(e){  if(e.source===f.contentWindow){    var d=e.data||{};    if(d.type===&quot;ma:frame-ok&quot;){ framed=true; var tip=document.getElementById(&quot;miniagent-csp-tip&quot;); if(tip) tip.remove(); var BR2=&quot;ma-bridge&quot;; if(!document.getElementById(BR2)){var bs=document.createElement(&quot;script&quot;);bs.id=BR2;bs.textContent=&quot;(function(){function ss(v){try{return typeof v===\&quot;object\&quot;&amp;&amp;v!==null?(v.outerHTML||JSON.stringify(v,null,2)):String(v);}catch(e){return String(v);}}window.addEventListener(\&quot;message\&quot;,function(e){var d=e.data||{};if(d.type!==\&quot;ma:runjs\&quot;)return;console.log(\&quot;[MA bridge] received ma:runjs\&quot;,{id:d.id,sourceOk:e.source===window.__maIframe.contentWindow,hasIframe:!!window.__maIframe});if(!window.__maIframe||e.source!==window.__maIframe.contentWindow)return;var ctx={window:window,document:document,location:location,fetch:window.fetch};try{var fn=new Function(\&quot;ctx\&quot;,\&quot;\\\&quot;use strict\\\&quot;;\\n\&quot;+d.code);var r=fn(ctx);console.log(\&quot;[MA bridge] executed ok\&quot;,{id:d.id,resultType:typeof r});e.source.postMessage({type:\&quot;ma:runjs:result\&quot;,id:d.id,ok:true,result:ss(r)},\&quot;*\&quot;);}catch(err){console.error(\&quot;[MA bridge] exec error\&quot;,{id:d.id,err:err&amp;&amp;err.stack});e.source.postMessage({type:\&quot;ma:runjs:result\&quot;,id:d.id,ok:false,error:String((err&amp;&amp;err.stack)||err)},\&quot;*\&quot;);}});})();&quot;;document.body.appendChild(bs);} }    else if(d.type===&quot;ma:resize&quot;){      var vh=window.innerHeight;      var h=Math.min(d.height||0, vh-32);      f.style.height=h+&quot;px&quot;;    }  }});}setTimeout(function(){ if(!framed) showTip(); }, 1500);})()">⬇️ 拖我到书签栏</a>
+
+    <p class="hint">
+      拖不动？点右边按钮复制启动器代码，再「添加书签」把代码粘进<strong>地址栏</strong>：
+      <button id="copy" class="copy-btn" type="button">复制启动器代码</button>
+      <span id="copied" class="copied" hidden>已复制 ✓</span>
+    </p>
+
+    <hr>
+
+    <h2>核心版本</h2>
+    <ul>
+      <li><a href="https://github.com/chensiyi/MiniAgent/tree/tampermonkey" target="_blank" rel="noopener">油猴脚本版（Tampermonkey）</a>——安装一次，配置<strong>跨站自动统一</strong>。</li>
+      <li><a href="https://github.com/chensiyi/MiniAgent/tree/basement" target="_blank" rel="noopener">basement 核心库</a>——IIFE 全局 <code>MiniAgent</code> 内核（书签版 / 油猴版共用）。</li>
+    </ul>
+
+    <hr>
+
+    <p class="note">
+      ⚠️ 书签版的存储位于固定 CDN 源 iframe 内的 localStorage；浏览器对跨源 iframe 的存储<strong>按嵌入站点分区</strong>，
+      因此在不同网页上的工具开关相互独立、不跨站共享。需要跨站统一请使用油猴版。详见 <a href="bookmarklet-storage.md">存储说明</a>。
+    </p>
+  </main>
+
+  <script>
+    const BM_CODE = "javascript:(function(){var MA_ID=\"miniagent-iframe\";if(window.__maUnsupported) return;var f=document.getElementById(MA_ID);if(f && f.style.display!==\"none\"){ f.style.display=\"none\"; return; }if(f && f.style.display===\"none\"){ f.style.display=\"\"; return; }if(document.getElementById(\"miniagent-csp-tip\")) return;var all=document.querySelectorAll(\"iframe\");for(var i=0;i<all.length;i++){var s=all[i].src||\"\";if(s.indexOf(\"host.html\")!==-1)all[i].remove();}f=document.createElement(\"iframe\");f.id=MA_ID;f.src=\"https://chensiyi.github.io/MiniAgent/host.html?v=1785071361764\";f.style.cssText=\"position:fixed;right:16px;bottom:16px;width:360px;height:480px;border:0;z-index:2147483647;background:transparent;overflow:hidden\";document.body.appendChild(f);window.__maIframe=f;var framed=false;function showTip(){  if(window.__maUnsupported || framed) return;  window.__maUnsupported=true;  if(f&&f.parentNode) f.parentNode.removeChild(f);  var t=document.createElement(\"div\");  t.id=\"miniagent-csp-tip\";  t.style.cssText=\"position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:2147483647;background:#1f1f1f;color:#fff;padding:10px 14px;border-radius:8px;font:13px system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.3);max-width:80vw;cursor:default\";  var msg=document.createTextNode(\"当前站点禁止加载浮层（严格 CSP），请使用 \");  var a=document.createElement(\"a\");  a.href=\"https://github.com/chensiyi/MiniAgent/tree/tampermonkey\";  a.target=\"_blank\"; a.rel=\"noopener\"; a.textContent=\"油猴脚本版\";  a.style.color=\"#4ea1ff\"; a.style.textDecoration=\"underline\";  t.appendChild(msg); t.appendChild(a);  var timer=setTimeout(function(){ if(t.parentNode) t.remove(); }, 8000);  t.addEventListener(\"mouseenter\",function(){ clearTimeout(timer); });  t.addEventListener(\"mouseleave\",function(){ timer=setTimeout(function(){ if(t.parentNode) t.remove(); }, 8000); });  document.body.appendChild(t);}if(!window.__maMsgBound){window.__maMsgBound=true;window.addEventListener(\"message\",function(e){  if(e.source===f.contentWindow){    var d=e.data||{};    if(d.type===\"ma:frame-ok\"){ framed=true; var tip=document.getElementById(\"miniagent-csp-tip\"); if(tip) tip.remove(); var BR2=\"ma-bridge\"; if(!document.getElementById(BR2)){var bs=document.createElement(\"script\");bs.id=BR2;bs.textContent=\"(function(){function ss(v){try{return typeof v===\\\"object\\\"&&v!==null?(v.outerHTML||JSON.stringify(v,null,2)):String(v);}catch(e){return String(v);}}window.addEventListener(\\\"message\\\",function(e){var d=e.data||{};if(d.type!==\\\"ma:runjs\\\")return;console.log(\\\"[MA bridge] received ma:runjs\\\",{id:d.id,sourceOk:e.source===window.__maIframe.contentWindow,hasIframe:!!window.__maIframe});if(!window.__maIframe||e.source!==window.__maIframe.contentWindow)return;var ctx={window:window,document:document,location:location,fetch:window.fetch};try{var fn=new Function(\\\"ctx\\\",\\\"\\\\\\\"use strict\\\\\\\";\\\\n\\\"+d.code);var r=fn(ctx);console.log(\\\"[MA bridge] executed ok\\\",{id:d.id,resultType:typeof r});e.source.postMessage({type:\\\"ma:runjs:result\\\",id:d.id,ok:true,result:ss(r)},\\\"*\\\");}catch(err){console.error(\\\"[MA bridge] exec error\\\",{id:d.id,err:err&&err.stack});e.source.postMessage({type:\\\"ma:runjs:result\\\",id:d.id,ok:false,error:String((err&&err.stack)||err)},\\\"*\\\");}});})();\";document.body.appendChild(bs);} }    else if(d.type===\"ma:resize\"){      var vh=window.innerHeight;      var h=Math.min(d.height||0, vh-32);      f.style.height=h+\"px\";    }  }});}setTimeout(function(){ if(!framed) showTip(); }, 1500);})()";
+    document.getElementById('copy').addEventListener('click', async function () {
+      try {
+        await navigator.clipboard.writeText(BM_CODE);
+        var c = document.getElementById('copied');
+        c.hidden = false;
+        setTimeout(function () { c.hidden = true; }, 2000);
+      } catch (e) {
+        window.prompt('复制失败，请手动复制：', BM_CODE);
+      }
+    });
+  </script>
+</body>
+</html>

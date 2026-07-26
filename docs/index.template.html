@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MiniAgent 书签版 · 安装</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(1200px 600px at 70% -10%, #1b2a4a 0%, #0b0e16 60%);
+    color: #e7ecf3; font: 15px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+  }
+  .card {
+    width: min(640px, 92vw); margin: 32px 0; padding: 28px 30px;
+    background: rgba(20,24,34,.72); border: 1px solid rgba(255,255,255,.12);
+    border-radius: 16px; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    box-shadow: 0 18px 60px rgba(0,0,0,.45);
+  }
+  h1 { margin: 0 0 6px; font-size: 24px; letter-spacing: .3px; }
+  h2 { margin: 22px 0 8px; font-size: 16px; color: #aab6c8; }
+  .lead { margin: 0 0 18px; color: #c4cddd; }
+  .bm-btn {
+    display: inline-block; padding: 14px 22px; border-radius: 12px;
+    background: linear-gradient(180deg,#3b82f6,#2563eb); color: #fff; font-weight: 700; font-size: 17px;
+    text-decoration: none; cursor: grab; user-select: none; box-shadow: 0 8px 22px rgba(37,99,235,.45);
+    border: 1px solid rgba(255,255,255,.25);
+  }
+  .bm-btn:active { cursor: grabbing; }
+  .hint { margin: 16px 0 0; color: #aeb9cb; font-size: 14px; }
+  .copy-btn {
+    margin-left: 6px; padding: 4px 12px; border-radius: 8px; cursor: pointer;
+    background: rgba(255,255,255,.1); color: #e7ecf3; border: 1px solid rgba(255,255,255,.2); font-size: 13px;
+  }
+  .copied { margin-left: 8px; color: #4ade80; font-size: 13px; }
+  hr { border: none; border-top: 1px solid rgba(255,255,255,.12); margin: 22px 0; }
+  ul { margin: 6px 0; padding-left: 20px; }
+  li { margin: 6px 0; }
+  a { color: #6cb2ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { background: rgba(255,255,255,.1); padding: 1px 5px; border-radius: 5px; font-size: 13px; }
+  .note { margin: 16px 0 0; font-size: 13px; color: #d8b46a; background: rgba(216,180,106,.1); border: 1px solid rgba(216,180,106,.3); padding: 10px 12px; border-radius: 10px; }
+</style>
+</head>
+<body>
+  <main class="card">
+    <h1>MiniAgent 书签版</h1>
+    <p class="lead">把下面这个按钮<strong>拖到浏览器书签栏</strong>，以后在任意网页点一下，就能在右下角拉起 AI 浮窗。</p>
+
+    <a class="bm-btn" href="@BOOKMARKLET_CODE@">⬇️ 拖我到书签栏</a>
+
+    <p class="hint">
+      拖不动？点右边按钮复制启动器代码，再「添加书签」把代码粘进<strong>地址栏</strong>：
+      <button id="copy" class="copy-btn" type="button">复制启动器代码</button>
+      <span id="copied" class="copied" hidden>已复制 ✓</span>
+    </p>
+
+    <hr>
+
+    <h2>核心版本</h2>
+    <ul>
+      <li><a href="https://github.com/chensiyi/MiniAgent/tree/tampermonkey" target="_blank" rel="noopener">油猴脚本版（Tampermonkey）</a>——安装一次，配置<strong>跨站自动统一</strong>。</li>
+      <li><a href="https://github.com/chensiyi/MiniAgent/tree/basement" target="_blank" rel="noopener">basement 核心库</a>——IIFE 全局 <code>MiniAgent</code> 内核（书签版 / 油猴版共用）。</li>
+    </ul>
+
+    <hr>
+
+    <p class="note">
+      ⚠️ 书签版的存储位于固定 CDN 源 iframe 内的 localStorage；浏览器对跨源 iframe 的存储<strong>按嵌入站点分区</strong>，
+      因此在不同网页上的工具开关相互独立、不跨站共享。需要跨站统一请使用油猴版。详见 <a href="bookmarklet-storage.md">存储说明</a>。
+    </p>
+  </main>
+
+  <script>
+    const BM_CODE = @BOOKMARKLET_CODE_JSON@;
+    document.getElementById('copy').addEventListener('click', async function () {
+      try {
+        await navigator.clipboard.writeText(BM_CODE);
+        var c = document.getElementById('copied');
+        c.hidden = false;
+        setTimeout(function () { c.hidden = true; }, 2000);
+      } catch (e) {
+        window.prompt('复制失败，请手动复制：', BM_CODE);
+      }
+    });
+  </script>
+</body>
+</html>

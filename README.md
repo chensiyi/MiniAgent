@@ -7,6 +7,10 @@
 
 ## 一键安装（添加书签）
 
+➡️ **[🖥️ 打开安装页，直接把按钮拖到书签栏](https://chensiyi.github.io/MiniAgent/)**
+
+（安装页 `https://chensiyi.github.io/MiniAgent/` 上有一个真实的「拖我到书签栏」按钮，从 github.io 页面拖进书签栏即可生效——这是最省事的方式。GitHub 渲染的 `.md` 会剥掉 `javascript:` 链接，所以这一步必须在安装页 HTML 里完成，不能只在 README 里。)
+
 书签的本质，是把下面这段 `javascript:` 启动器放进书签的**地址栏（位置字段）**：
 
 1. 打开启动器文件，**全选复制其中的 `javascript:` 代码**：
@@ -48,6 +52,8 @@ MiniAgent/ (bookmarklet 分支)
 ├── src/tools/bookmarklet_local_storage.ts# iframe localStorage 垫片（GM_* → iframe 存储）
 ├── bookmarklet/                          # env 垫片 / host.html / bootstrap 装配
 ├── docs/
+│   ├── index.template.html               # 安装页模板（@BOOKMARKLET_CODE@ 占位，由构建注入）
+│   ├── index.html                        # 构建生成、GitHub Pages 首页（含可拖拽书签按钮）
 │   ├── host.html                         # GitHub Pages 托管的固定 host（iframe 源）
 │   └── bookmarklet-storage.md            # 存储设计 + 跨站分区说明（§8）
 ├── vite.config.ts                        # bookmarklet 专用构建（去 monkey 插件）
@@ -59,11 +65,11 @@ MiniAgent/ (bookmarklet 分支)
 jsDelivr 按 git tag 分发 `dist/` 与 `docs/host.html`，而 `dist/` 被 `.gitignore` 忽略，须强制入库才能进 tag：
 
 ```bash
-npm run build                              # 产出 CDN 版 dist/（勿用 test 模式）
-git add -f dist docs/host.html README.md docs/bookmarklet-storage.md
+npm run build                              # 产出 CDN 版 dist/ + 注入生成 docs/index.html（勿用 test 模式）
+git add -f dist docs/host.html docs/index.html docs/index.template.html README.md docs/bookmarklet-storage.md scripts
 git commit -m "release: vX.Y.Z"
 git tag bookmarkletX.Y.Z
-git push origin bookmarklet --tags        # jsDelivr @bookmarklet 即生效
+git push origin bookmarklet --tags        # jsDelivr @bookmarklet 即生效，GitHub Pages 同步首页
 ```
 
 > ⚠️ 工作区 `npm run test` 产出的 `dist/` 指向 `localhost:5174`，**不可直接发版**——发版前务必先 `npm run build` 覆盖。

@@ -5,7 +5,7 @@
   "type": "module",
   "description": "MiniAgent —— 极简智能体（原生 DOM + 轻量工具注册，注入任意网页）",
   "scripts": {
-    "build": "vite build",
+    "build": "vite build && node scripts/inject-bookmarklet.mjs",
     "build:bookmarklet": "vite build",
     "test": "vite build --mode test && vite preview --outDir docs --port 5174 --strictPort",
     "typecheck": "tsc --noEmit"
