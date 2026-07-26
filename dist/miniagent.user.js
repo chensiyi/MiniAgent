@@ -1,8 +1,9 @@
 // ==UserScript==
 // @name         MiniAgent
 // @namespace    https://github.com/chensiyi/MiniAgent
-// @version      0.2.8.20260727015618
+// @version      0.2.1.20260727022134
 // @description  极简 userScript 智能体（原生 DOM + GM 桥接 LLM；核心经 @require 引入 basement 全局 MiniAgent）
+// @license      https://www.apache.org/licenses/LICENSE-2.0
 // @downloadURL  https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@tampermonkey/dist/miniagent.user.js
 // @updateURL    https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@tampermonkey/dist/miniagent.user.js
 // @match        *://*/*

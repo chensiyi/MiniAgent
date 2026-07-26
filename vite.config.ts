@@ -46,6 +46,7 @@ export default defineConfig(async ({ mode, command }) => {
           namespace: 'https://github.com/chensiyi/MiniAgent',
           version,
           description: '极简 userScript 智能体（原生 DOM + GM 桥接 LLM；核心经 @require 引入 basement 全局 MiniAgent）',
+          license: 'https://www.apache.org/licenses/LICENSE-2.0', // 脚本许可声明：Apache-2.0（完整 URL，Tampermonkey / GreasyFork 均识别）
           match: ['*://*/*'], // 注入范围（后续脚本管理可控）
           noframes: true, // 仅注入顶层文档：一个标签页可能内嵌多个 iframe，避免脚本在子 frame 内重复实例化
           grant: [
