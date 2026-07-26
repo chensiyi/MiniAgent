@@ -11,7 +11,7 @@ const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
 // 书签版分发 tag：jsDelivr 按 git tag 取 immutable 内容，避免 @bookmarklet 浮动分支的服务端缓存旧包。
 // 每次发版须同步 bump 此常量，且 git tag 名与之对齐（如 bookmarklet0.2.1）。
-const bookmarkletVersion = 'bookmarklet0.2.2';
+const bookmarkletVersion = 'bookmarklet0.2.3';
 const CDN_BASE = 'https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@' + bookmarkletVersion + '/dist';
 const PAGES_HOST = 'https://chensiyi.github.io/MiniAgent/host.html';
 const LOCAL_HOST = 'http://localhost:5174/host.html';

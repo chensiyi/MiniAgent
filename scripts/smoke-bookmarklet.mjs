@@ -12,7 +12,7 @@ const hostHtml = fs.readFileSync(root + 'src/host.html', 'utf-8');
 const bmMatch = hostHtml.match(/src="([^"]*miniagent-basement[^"]*)"/);
 const basementUrl = bmMatch
   ? bmMatch[1]
-  : 'https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@basement-0.2.6/dist/miniagent-basement.js';
+  : 'https://cdn.jsdelivr.net/gh/chensiyi/MiniAgent@basement-0.2.7/dist/miniagent-basement.js';
 console.log('[smoke] basement URL:', basementUrl);
 
 // 2. 拉 basement 源码

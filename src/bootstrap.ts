@@ -37,15 +37,18 @@ async function main(): Promise<void> {
   try {
     console.log('[MiniAgent][boot] ① 启动');
 
-    // ⚠️ 关键：basement 的 definePreset 仅接收【单个】工具列表（内部 T = 该列表，第二参数会被忽略）。
-    // 因此必须把 storage（base）+ 默认工具 + ui 合并为一份完整列表传入；
-    // 之前误传两参 (base, all) 导致 allTools（含 ui）被丢弃，bootstrap 只注册了 baseTools → UI 不挂载。
+    // basement-0.2.7 两参 definePreset(baseTools, allTools) 模型：
+    //  - baseTools = 基础底座（storage 存储层 + hooks 内核），始终先注册、不可经开关关闭；
+    //  - allTools = 完整预装（baseTools 去重 + 默认工具 + ui），按 config.disabledTools 过滤后注册；
+    //  - 此前单参写法（误传 all 被忽略）已废弃，现对齐两列表模型。
     // ui 为常规工具，经 disabledTools 过滤后仍默认启用（见下方清理）。
     // run_js 用 bookmarklet 越狱包装替换 basement 原版（默认在【原网页】上下文执行，可操作原网页 DOM）。
+    const hooksTool = (defaultTools as ToolDef[]).find((t) => t.name === 'hooks');
     const bmDefaultTools = (defaultTools as ToolDef[]).filter((t) => t.name !== 'run_js');
+    const baseTools = [storageTool, hooksTool!];
     const allTools = [storageTool, ...bmDefaultTools, runJsTool, uiTool];
-    toolManager.definePreset(allTools);
-    console.log('[MiniAgent][boot] ② definePreset 完成（共 ' + allTools.length + ' 个工具），开始 bootstrap()');
+    toolManager.definePreset(baseTools, allTools);
+    console.log('[MiniAgent][boot] ② definePreset 完成（base=' + baseTools.length + ' all=' + allTools.length + '），开始 bootstrap()');
 
     // 防御：旧持久化数据可能残留 'ui'/'gm_storage' 在 disabledTools（改名后旧键失效，或曾被手动禁用），
     // 导致 boot 过滤掉 UI。agent.config 是访问器属性，必须【整体赋值】触发 setter 写回 localStorage，

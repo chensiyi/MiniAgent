@@ -859,14 +859,17 @@
 	async function main() {
 		try {
 			console.log("[MiniAgent][boot] ① 启动");
+			const hooksTool = defaultTools.find((t) => t.name === "hooks");
+			const bmDefaultTools = defaultTools.filter((t) => t.name !== "run_js");
+			const baseTools = [storageTool, hooksTool];
 			const allTools = [
 				storageTool,
-				...defaultTools.filter((t) => t.name !== "run_js"),
+				...bmDefaultTools,
 				runJsTool,
 				uiTool
 			];
-			toolManager.definePreset(allTools);
-			console.log("[MiniAgent][boot] ② definePreset 完成（共 " + allTools.length + " 个工具），开始 bootstrap()");
+			toolManager.definePreset(baseTools, allTools);
+			console.log("[MiniAgent][boot] ② definePreset 完成（base=" + baseTools.length + " all=" + allTools.length + "），开始 bootstrap()");
 			const badKey = (x) => x === "ui" || x === "gm_storage";
 			const dt = agent.config.disabledTools ?? [];
 			if (dt.some(badKey)) {
