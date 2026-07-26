@@ -61,7 +61,7 @@ declare global {
   // 工具生命周期管理器（2026-07-25 从 executor 迁入）：预装宇宙 / bootstrap / 启停 / 重建 全部收归此处。
   // 内核 executor 退化为哑注册表，不关心预装清单与业务启停。
   type ToolManagerApi = {
-    definePreset(tools: ToolDef[]): void; // 宿主层注入完整预装宇宙（单参；basement-0.2.6 契约：bootstrap 内部按 deps 拓扑 + disabledTools 过滤，不区分 base/all）
+    definePreset(baseTools: ToolDef[], allTools: ToolDef[]): void; // 宿主层注入预装宇宙：baseTools 基础底座（先注册、不可经开关关闭）；allTools 完整预装（按 config.disabledTools 过滤）；basement-0.2.7 两参模型
     bootstrap(): void; // 启动编排：baseTools 先注册 → 镜像存储后读 disabledTools → 过滤注册 allTools → 重建用户工具
     getStates(): ToolState[]; // 完整工具清单（含启用态），供 UI 启停面板渲染
     setEnabled(name: string, enabled: boolean): Promise<void> | void; // 启停（baseTools 拒绝关闭）

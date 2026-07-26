@@ -6,12 +6,15 @@ import { gmStorageTool } from './tools/gm_storage';
 // 消费经 @require 引入的 basement 全局（运行时仅绑定 executor↔agent，IIFE 已注册内核 hooks；不自动启动其余工具）。
 // 启动编排完全交给 tool_manager：注入完整预装宇宙（含环境层工具 gm_storage / ui），由 bootstrap 统一编排。
 //  - 依赖关系只活在工具自身 deps 图（hooks ← gm_storage ← ui），由 registerAll 内部拓扑序处理，内核不另设优先级层；
-//  - 预装宇宙以单参 definePreset(tools) 注入（basement-0.2.6 单参；hooks 已在 defaultTools 内、gm_storage/ui 为宿主层补充）；
-//  - bootstrap 内部按 disabledTools 过滤并按 deps 拓扑注册，最后重建用户持久化工具；
-//  - baseTools/infra 概念由 basement 内部处理（已注册工具不可经开关关闭），宿主层不再区分 base/all。
+//  - 预装宇宙以两参 definePreset(baseTools, allTools) 注入（basement-0.2.7 两参模型）：
+//      baseTools = 基础底座（gm_storage 存储层 + hooks 内核），始终先注册、不可经开关关闭；
+//      allTools = 完整预装（baseTools 去重 + defaultTools + ui），按 config.disabledTools 过滤后注册；
+//  - bootstrap 内部按 disabledTools 过滤 allTools 并按 deps 拓扑注册，最后重建用户持久化工具；
+//  - 两参模型下宿主层需区分 base/all：base 为不可关的底座，all 为含用户可关项的完整宇宙。
 const { agent, toolManager, defaultTools } = MiniAgent;
+const hooksTool = defaultTools.find((t) => t.name === 'hooks');
 
-toolManager.definePreset([gmStorageTool, ...defaultTools, uiTool]); // 单参：完整预装宇宙（gm_storage/ui 为宿主层补充，hooks 已在 defaultTools 内）
+toolManager.definePreset([gmStorageTool, hooksTool!], [gmStorageTool, ...defaultTools, uiTool]); // baseTools=基础底座（先注册、不可关）；allTools=完整预装（按 disabledTools 过滤）
 toolManager.bootstrap(); // 启动编排（按 disabledTools 过滤 → 按 deps 拓扑注册 → 重建用户工具）
 
 // 暴露全局单例（标准用户脚本空间：沙箱内 globalThis，便于运行时 / LLM 动态编辑）
