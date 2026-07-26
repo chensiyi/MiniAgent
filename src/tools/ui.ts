@@ -1,7 +1,9 @@
 /// <reference path="../basement.d.ts" />
-import { GM_addStyle } from '$';
 
-// @require 注入的外部库，运行期在 userscript 全局作用域可用
+// 独立环境（bookmarklet 分支）：样式经原生 <style> 注入 document.head，不再依赖 GM_addStyle 垫片。
+// marked / DOMPurify 仍为运行期全局（由宿主页或打包提供），非 GM 专属，故保留原消费方式。
+
+// 外部库（marked / DOMPurify），运行期在 iframe 全局作用域可用
 declare const DOMPurify: { sanitize(dirty: string, config?: Record<string, unknown>): string; [key: string]: unknown };
 
 // Trusted Types 兼容：require-trusted-types-for 'script' 下 innerHTML 必须是 TrustedHTML。
@@ -15,8 +17,8 @@ if (_tt) {
 }
 function setHTML(el: Element, html: string): void { el.innerHTML = _hp ? (_hp.createHTML(html) as unknown as string) : html; }
 
-// UI markdown 渲染：用 @require 注入的全局 marked + DOMPurify 本地渲染（不依赖 basement 暴露的 renderMarkdown 全局，
-// marked/DOMPurify 由 vite.config 的 @require 编译期注入 userscript 全局作用域，运行期直接消费，无运行时下载）。
+// UI markdown 渲染：用全局 marked + DOMPurify 本地渲染（不依赖 basement 暴露的 renderMarkdown 全局，
+// marked/DOMPurify 由 host.html <script> 编译期注入 iframe 全局作用域，运行期直接消费，无运行时下载）。
 // 这样 basement 契约无需为展示层泄漏 renderMarkdown 全局，框架边界更清晰。
 // 本地渲染函数（替代原 MiniAgent.renderMarkdown）：
 declare const marked: { parse(src: string, opts?: Record<string, unknown>): string | Promise<string> };
@@ -26,15 +28,15 @@ function renderMarkdownLocal(src: string): string {
   return DOMPurify.sanitize(html);
 }
 
-// 玻璃方框浮层（对齐 docs/ui-design.html v4）：容器透明无背景板、无圆角、深色玻璃 + 浅色字、顶部遮罩淡出
+// 玻璃方框浮层：容器透明无背景板、无圆角、深色玻璃 + 浅色字、顶部遮罩淡出
 const STYLE = `
 :root{--brand:#378DDD;--brand-soft:rgba(55,141,221,.22);--glass:rgba(18,26,44,.52);--glass-strong:rgba(22,31,52,.66);--glass-border:rgba(255,255,255,.16);--glass-border-strong:rgba(255,255,255,.26);--text:#eef2ff;--text-dim:rgba(238,242,255,.62);--risk-high:#fb923c}
-#miniagent-root{position:fixed;right:16px;bottom:16px;z-index:2147483647;width:320px;max-height:calc(100vh - 32px);display:flex;flex-direction:column;gap:8px;font:14px system-ui;color:var(--text)}
-.ma-bubbles{flex:1 1 auto;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:6px;padding:4px 2px;-webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 10%,#000 100%);mask-image:linear-gradient(to bottom,transparent 0,#000 10%,#000 100%)}
+#miniagent-root{position:relative;z-index:2147483647;width:100%;height:100%;display:flex;flex-direction:column;gap:8px;font:14px system-ui;color:var(--text);pointer-events:auto}
+.ma-bubbles{flex:1 1 auto;min-height:0;overflow-y:auto;display:flex;flex-direction:column;justify-content:flex-end;gap:6px;padding:4px 2px;order:1;-webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 10%,#000 100%);mask-image:linear-gradient(to bottom,transparent 0,#000 10%,#000 100%)}
 .ma-bubble{padding:6px 9px;max-width:88%;white-space:pre-wrap;word-break:break-word;border:1px solid var(--glass-border);background:var(--glass);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);box-shadow:0 2px 10px rgba(0,0,0,.18);align-self:flex-start}
 .ma-bubble.user{align-self:flex-end;background:var(--brand-soft);border-color:rgba(55,141,221,.5)}
 .ma-bubble.tool{align-self:flex-start;font-size:12px;background:rgba(18,26,44,.62)}
-.ma-input-row{display:flex;gap:6px;align-items:center;position:relative}
+.ma-input-row{display:flex;gap:6px;align-items:center;position:relative;order:3}
 .ma-ac{position:absolute;left:0;right:0;bottom:100%;margin-bottom:4px;background:var(--glass-strong);border:1px solid var(--glass-border);overflow:auto;max-height:210px;box-shadow:0 4px 16px rgba(0,0,0,.3);color:var(--text)}
 .ma-ac-item{padding:6px 10px;cursor:pointer;display:flex;flex-direction:column;gap:1px}
 .ma-ac-item.active,.ma-ac-item:hover{background:var(--brand-soft)}
@@ -51,8 +53,8 @@ const STYLE = `
 .ma-approve .no{background:rgba(255,255,255,.12);color:var(--text)}
 .ma-risk{color:var(--risk-high);font-weight:600}
 .ma-tools{padding:8px 10px;border:1px solid var(--glass-border);background:var(--glass);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);cursor:pointer}
-.ma-tools-panel{padding:8px;border:1px solid var(--glass-border-strong);background:var(--glass-strong);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);display:flex;flex-direction:column;gap:4px;min-height:120px;max-height:40vh;overflow:auto}
-.ma-tool-row{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px}
+.ma-tools-panel{padding:8px;border:1px solid var(--glass-border-strong);background:var(--glass-strong);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);display:flex;flex-direction:column;gap:4px;min-height:120px;max-height:240px;overflow:auto;width:100%;box-sizing:border-box;order:4}
+.ma-tool-row{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px;width:100%;max-width:100%}
 .ma-tool-name{word-break:break-all;flex-shrink:0}
 .ma-tool-desc{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;color:var(--text-dim);font-size:11px}
 .ma-think{margin:0 0 6px;border-left:3px solid var(--brand);overflow:hidden}
@@ -71,8 +73,9 @@ const STYLE = `
 .ma-md-content th,.ma-md-content td{border:1px solid var(--glass-border);padding:2px 6px}
 .ma-md-content hr{border:0;border-top:1px solid var(--glass-border);margin:8px 0}
 .ma-md-content a{color:#6fb0f0}
-.ma-toggle{display:block;width:100%;padding:2px 0;margin:0;text-align:center;border:1px solid var(--glass-border);background:var(--glass);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);color:var(--text);cursor:pointer;font-size:11px;line-height:1.3}
+.ma-toggle{display:block;width:100%;padding:2px 0;margin:0;text-align:center;border:1px solid var(--glass-border);background:var(--glass);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);color:var(--text);cursor:pointer;font-size:11px;line-height:1.3;order:2}
 .ma-toggle:hover{background:rgba(255,255,255,.16)}
+.ma-collapsed{justify-content:flex-end}
 .ma-collapsed .ma-bubbles,.ma-collapsed .ma-input-row,.ma-collapsed .ma-tools-panel{display:none}
 `;
 
@@ -90,9 +93,20 @@ function renderToolsPanel(panel: HTMLElement): void {
     cb.onchange = async () => {
       const next = cb.checked;
       await MiniAgent.toolManager.setEnabled(s.name, next);
-      // 禁用被用户拒绝时 setEnabled 未生效（如关闭界面/baseTools 不可关），复选框还原为实际启用态
+      // setEnabled 后取「实际生效态」——禁用被拒绝（如关闭界面/baseTools 不可关）时 live≠next
       const live = MiniAgent.executor.list(true).some((t) => t.name === s.name);
       if (cb.checked !== live) cb.checked = live;
+      // 直接落盘黑名单键到 iframe 的 localStorage（basement config 是纯模型不保证自动落盘，见 basement config.ts）。
+      // 以实际生效态 live 为准，保证同站点内刷新后开关状态存活。跨站不共享（浏览器对跨源 iframe storage 按站点分区）。
+      const json = (() => {
+        try {
+          const cur = JSON.parse(localStorage.getItem('miniagent:__disabledTools') || '[]');
+          const set = new Set(Array.isArray(cur) ? cur : []);
+          if (live) set.delete(s.name); else set.add(s.name);
+          return JSON.stringify([...set]);
+        } catch { return '[]'; }
+      })();
+      try { localStorage.setItem('miniagent:__disabledTools', json); } catch { /* iframe 不可用时忽略 */ }
     };
     row.append(name, desc, cb); panel.append(row);
   }
@@ -188,7 +202,8 @@ export const ui = {
     // 气泡区 + 输入行 两段式结构（无 header / 无卡片，玻璃落在 .ma-bubble 上）
     mount(onSend: (text: string) => void): void {
       if (document.getElementById('miniagent-root')) return;
-      GM_addStyle(STYLE);
+      const styleEl = document.createElement('style'); styleEl.textContent = STYLE;
+      document.head.appendChild(styleEl);
       root = document.createElement('div'); root.id = 'miniagent-root';
       setHTML(root, `
         <button class="ma-toggle" type="button" title="折叠/展开面板">▾</button>
@@ -202,6 +217,8 @@ export const ui = {
         <div class="ma-tools-panel" style="display:none"></div>`);
       document.body.append(root);
 
+      // 见下方节点赋值后注入的「自适应高度」ResizeObserver（需 bubbles 就绪）。
+
       bubbles = root.querySelector('.ma-bubbles') as HTMLElement;
       input = root.querySelector('.ma-input') as HTMLInputElement;
       sendBtn = root.querySelector('.ma-send') as HTMLButtonElement;
@@ -214,6 +231,22 @@ export const ui = {
       toolsBtn.onclick = () => ui.tools.toggle();
       toggleBtnEl = root.querySelector('.ma-toggle') as HTMLButtonElement;
       toggleBtnEl.onclick = () => ui.panel.toggle();
+
+      // 自适应高度（仅高度，宽度固定 360px）：iframe 锚定右下角、向上生长、封顶视口。
+      // 自然高度 = 面板 chrome（折叠/输入/工具面板 + gap）+ 气泡区全文高；
+      // 以 (root.clientHeight - bubbles.clientHeight) + bubbles.scrollHeight 自洽求得：
+      // 气泡滚动时前者为 chrome、后者为全文；未滚动时两者抵消为 root.clientHeight。
+      // 该值只依赖内容、不依赖自身渲染高度 → 不会越缩越小回环。
+      const measure = (): void => {
+        const chrome = (root.clientHeight || 0) - (bubbles.clientHeight || 0);
+        const content = bubbles.scrollHeight || 0;
+        parent.postMessage({ type: 'ma:resize', height: chrome + content }, '*');
+      };
+      const ro = new ResizeObserver(measure);
+      ro.observe(root);
+      ro.observe(bubbles);
+      measure();
+
       const doSend = (): void => {
         const text = input.value.trim(); if (!text) return;
         input.value = ''; if (acEl) acEl.style.display = 'none'; onSendRef?.(text);
@@ -295,7 +328,7 @@ export const ui = {
     },
 
     // 流结束：指定 id 的 assistant 气泡正文 + think 正文做 markdown 渲染（一次性，避免流式频繁 setHTML）。
-    // 渲染走本地 renderMarkdownLocal（@require 注入的 marked + DOMPurify）。
+    // 渲染走本地 renderMarkdownLocal（全局 marked + DOMPurify）。
     finalize(mid: string, role: string, text: string, reasoning?: string): void {
       const el = bubblesById.get(mid) ?? null;
       if (!el) { console.warn('[MiniAgent.UI] finalize 跳过：找不到气泡', { mid, role, textLen: text?.length, reasoningLen: reasoning?.length }); return; }
@@ -393,7 +426,7 @@ const headlessSink: OutputSink = {
 };
 
 // 配置不完整时的提示文案
-const CONFIG_HINT = '⚠️ 未配置 API Key。两种设置方式：\n① 打开 Tampermonkey 仪表盘 → 本脚本 → 数值，直接编辑 `config` 键（JSON：{"apiKey":"你的Key","baseURL":"https://openrouter.ai/api/v1","model":"openrouter/free"}）；\n② 或运行命令：/gm_storage /action set /ns "" /key config /update true /value {"apiKey":"你的Key","baseURL":"https://openrouter.ai/api/v1","model":"openrouter/free"}';
+const CONFIG_HINT = '⚠️ 未配置 API Key。两种设置方式：\n① 打开浏览器 DevTools → Application → Local Storage，直接编辑 `config` 键（JSON：{"apiKey":"你的Key","baseURL":"https://openrouter.ai/api/v1","model":"openrouter/free"}）；\n② 或运行命令：/storage /action set /key config /update true /value {"apiKey":"你的Key","baseURL":"https://openrouter.ai/api/v1","model":"openrouter/free"}';
 
 // 等待 DOM 就绪（UI 挂载用）
 function whenDomReady(): Promise<void> {
@@ -408,7 +441,7 @@ let launcherEl: HTMLElement | null = null;
 function ensureLauncher(): HTMLElement {
   if (launcherEl) return launcherEl;
   const css =
-    '#miniagent-launcher{position:fixed;right:14px;bottom:14px;z-index:2147483646}' +
+    '#miniagent-launcher{position:fixed;right:14px;bottom:14px;z-index:2147483646;pointer-events:auto}' +
     '#miniagent-launcher button{padding:6px 12px;border:1px solid rgba(55,141,221,.6);border-radius:8px;' +
     'background:rgba(55,141,221,.92);color:#fff;cursor:pointer;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,.3)}';
   const style = document.createElement('style'); style.textContent = css;
@@ -429,27 +462,36 @@ function createLauncher(): void {
   el.style.display = uiUp ? 'none' : '';
 }
 
-// 消费经 @require 引入的 basement 全局（运行时仅绑定 executor↔agent，IIFE 已注册内核 hooks；不自动启动其余工具）
+// 消费经 CDN <script> 引入的 basement 全局（运行时仅绑定 executor↔agent，IIFE 已注册内核 hooks；不自动启动其余工具）
 const { agent, handleToolCommand } = MiniAgent;
 
 // UI 工具：注册后挂载聊天界面并接管输出/渲染/确认闸；禁用即"关闭界面"（经确认闸、可逆），核心仍 headless 运行。启用即重新挂载。
 export const uiTool: ToolDef = {
   name: 'ui',
   author: 'sys',
-  deps: [{ name: 'gm_storage', author: 'sys' }], // 依赖 gm_storage：确保其 register（镜像 GM_*）先执行，ui 挂载时 hooks/默认工具已就绪
+  deps: [{ name: 'storage', author: 'sys' }], // 依赖 storage：确保其 register（镜像 localStorage）先执行，ui 挂载时 hooks/默认工具已就绪
   description: '界面工具：注册后挂载聊天界面并接管输出/渲染/确认闸；在工具清单禁用即"关闭界面"（经确认闸、可逆），核心仍 headless 运行。启用即重新挂载。',
   parameters: {},
   register: async (_ctx) => {
-    agent.output = ui.chat; // 输出槽接管（agent.output 默认 headless 空实现）
-    agent.extensions.set('ui', ui.chat); // UI 渲染能力（marked 已成为独立工具，不经此接管）
-    agent.extensions.set('approval', ui.requestApproval); // 确认闸经此接入（核心 requestApproval 委托）
-    await whenDomReady();
-    ui.chat.mount((text) => {
+    console.log('[ui] register 开始');
+    try {
+      agent.output = ui.chat; // 输出槽接管（agent.output 默认 headless 空实现）
+      agent.extensions.set('ui', ui.chat); // UI 渲染能力（marked 已成为独立工具，不经此接管）
+      agent.extensions.set('approval', ui.requestApproval); // 确认闸经此接入（核心 requestApproval 委托）
+      console.log('[ui] await whenDomReady… readyState=', document.readyState);
+      await whenDomReady();
+      console.log('[ui] DOM ready，调 mount；当前已存在root=', !!document.getElementById('miniagent-root'));
+      ui.chat.mount((text) => {
       // 发送期间按钮在「发送 ↔ 停止」间切换；停止按钮经 agent.chatStop 中断在途请求。
-      // 开始时切「停止」并绑定中断，结束由 basement engine 的 finally 复位（setRunning(false)）。
+      // 运行态严格由两队列派生（basement 的 agent.isRunning = messageQueue 或 toolCallQueue 非空）：
+      // 仅在「消息队列与工具调用队列皆空」时切回发送，否则保持停止——不引入任何需同步的私有标志。
+      // 多轮/连发时 sendMessage 因基座引擎守卫（引擎已在跑）会同步立即 resolve，但此时队列仍非空 → isRunning 为 true → 不复位；
+      // 引擎全部跑完（队列空）才由 basement engine.finally 复位，此处 .finally 也会再次核对 isRunning 幂等复位。
       const run = (fn: () => Promise<void>): void => {
         ui.chat.setRunning(true, () => agent.chatStop());
-        fn().finally(() => ui.chat.setRunning(false));
+        fn().finally(() => {
+          if (!agent.isRunning) ui.chat.setRunning(false);
+        });
       };
       // 用户直接调用工具：/tool_name /param value
       if (text.startsWith('/')) {
@@ -465,7 +507,13 @@ export const uiTool: ToolDef = {
       }
       run(() => agent.sendMessage(text));
     });
-    hideLauncher();
+      console.log('[ui] mount 调用完成，root=', !!document.getElementById('miniagent-root'));
+      hideLauncher();
+      console.log('[ui] register 完成，launcher 已隐藏');
+    } catch (e) {
+      console.error('[ui] register 抛错:', e);
+      throw e;
+    }
   },
   unregister: (_ctx) => {
     ui.chat.unmount();

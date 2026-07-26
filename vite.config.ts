@@ -57,10 +57,9 @@ export default defineConfig(({ mode }) => {
           }
 
           // javascript: 加载器（iframe 指向宿主页）。
-          // 高度撑满视口（CSS right:16px;top:16px;bottom:16px，显式高度避免 iframe 塌成 150px 默认高）；
-          // 面板内容经 #miniagent-root 的 justify-content:flex-end 从底部对齐，故浮窗落在【右下角】、上方留透明空白。
-          // 只有【宽度】跟随内部面板变化（mount 时 ResizeObserver 回传 width，此处 ma:resize 仅改 iframe 宽）。
-          // 透明、pointer-events 默认 auto，原网页其余区域完全可点（满足「透明 + 可交互」，且无需 fullscreen none 重构）。
+          // 锚定【右下角】（CSS right:16px;bottom:16px，固定宽 360px、初始高 480px）；仅【高度】随内容自适应：
+          // mount 时 ResizeObserver 回传自然高度，此处 ma:resize 把 iframe 高夹在 [160, 视口高-32]，向上生长、封顶视口。
+          // 宽度恒定不随内容横向扩充（避免左右撑宽错位）。透明、pointer-events 默认 auto，原网页其余区域完全可点。
           // 开/关 toggle + 真单例逻辑保留（防重复叠加）。
           // 宽严站点探测：iframe 一旦被允许加载，host.html 会立即 postMessage 'ma:frame-ok'（先于 basement）；
           // 若 iframe 因宿主页 frame-src CSP 被拦截（如 GitHub），浏览器会立即派发 securitypolicyviolation 事件
@@ -98,7 +97,7 @@ export default defineConfig(({ mode }) => {
             'f=document.createElement("iframe");' +
             'f.id=MA_ID;' +
             'f.src=' + JSON.stringify(hostUrl + '?v=' + Date.now()) + ';' +
-            'f.style.cssText="position:fixed;right:16px;top:16px;bottom:16px;width:320px;border:0;z-index:2147483647;background:transparent;overflow:hidden";' +
+            'f.style.cssText="position:fixed;right:16px;bottom:16px;width:360px;height:480px;border:0;z-index:2147483647;background:transparent;overflow:hidden";' +
             'document.body.appendChild(f);' +
             'window.__maIframe=f;' +
             'var framed=false;' +
@@ -126,9 +125,9 @@ export default defineConfig(({ mode }) => {
             '    var d=e.data||{};' +
             '    if(d.type==="ma:frame-ok"){ framed=true; var tip=document.getElementById("miniagent-csp-tip"); if(tip) tip.remove(); var BR2="ma-bridge"; if(!document.getElementById(BR2)){var bs=document.createElement("script");bs.id=BR2;bs.textContent=' + JSON.stringify(BRIDGE_SRC) + ';document.body.appendChild(bs);} }' +
             '    else if(d.type==="ma:resize"){' +
-            '      var vw=window.innerWidth;' +
-            '      var w=Math.max(300, Math.min(d.width||300, Math.min(420, vw-32)));' +
-            '      f.style.width=w+"px";' +
+            '      var vh=window.innerHeight;' +
+            '      var h=Math.min(d.height||0, vh-32);' +
+            '      f.style.height=h+"px";' +
             '    }' +
             '  }' +
             '});}' +

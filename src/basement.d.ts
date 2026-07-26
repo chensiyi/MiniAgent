@@ -1,6 +1,6 @@
-// 声明经 userscript `@require` 引入的 basement 全局契约（类比 monkey.d.ts）。
-// basement 构建产物 dist/miniagent-basement.js 在 userscript 隔离作用域内暴露 window.MiniAgent；
-// 油猴 / 浏览器标签分支仅写薄壳胶水消费此全局，不打包任何核心源码。
+// 声明经 CDN <script> 引入的 basement 全局契约。
+// basement 构建产物 dist/miniagent-basement.js 在 iframe 全局作用域内暴露 window.MiniAgent；
+// bookmarklet 分支仅写薄壳胶水消费此全局，不打包任何核心源码。
 export {};
 
 declare global {
@@ -23,6 +23,7 @@ declare global {
     parameters?: Record<string, unknown>;
     deps?: { name: string; author?: string }[];
     hidden?: boolean;
+    riskLevel?: 'low' | 'medium' | 'high' | 'critical'; // 高危走确定性确认（与 basement 运行时对齐）
     call?: (args: Record<string, unknown>, ctx: RunCtx) => Promise<string> | string;
     register?: (ctx: RegisterCtx) => void | Promise<void>;
     unregister?: (ctx: RegisterCtx) => void | Promise<void>;
@@ -61,10 +62,12 @@ declare global {
   // 工具生命周期管理器（2026-07-25 从 executor 迁入）：预装宇宙 / bootstrap / 启停 / 重建 全部收归此处。
   // 内核 executor 退化为哑注册表，不关心预装清单与业务启停。
   type ToolManagerApi = {
-    definePreset(baseTools: ToolDef[], allTools: ToolDef[]): void; // 宿主层注入预装宇宙：baseTools 基础能力始终先注册；allTools 完整预装按 disabledTools 过滤
-    bootstrap(): void; // 启动编排：baseTools 先注册 → 镜像存储后读 disabledTools → 过滤注册 allTools → 重建用户工具
+    // ⚠️ basement-0.2.6 的 definePreset 仅接收【单个】工具列表（内部 T = 该列表，第二参数会被忽略）。
+    // 宿主层把 storage（基础底座）+ 默认工具 + 环境层 UI 合并为一份完整列表传入。
+    definePreset(allTools: ToolDef[]): void; // 注入预装宇宙（含环境层工具 storage/ui），由 bootstrap 统一编排
+    bootstrap(): void; // 启动编排：读 disabledTools → 过滤注册预装 → 重建用户工具
     getStates(): ToolState[]; // 完整工具清单（含启用态），供 UI 启停面板渲染
-    setEnabled(name: string, enabled: boolean): Promise<void> | void; // 启停（baseTools 拒绝关闭）
+    setEnabled(name: string, enabled: boolean): Promise<void> | void; // 启停工具（ui 关闭前弹确认）
     deleteTool(name: string): Promise<string>;
   };
 
@@ -75,14 +78,15 @@ declare global {
     extensions: Map<string, unknown>;
     tools: Map<string, ToolDef>;
     messages: unknown[];
+    isRunning: boolean; // 运行态派生判据：messageQueue 或 toolCallQueue 非空即为 true（由两队列纯派生，无需额外布尔）；UI 据此决定发送/停止按钮
     sendMessage(text: string): Promise<void>;
     chatStop(): void;
     chat: { sendMessage(text: string): Promise<void> };
   };
 
-  // ---- basement IIFE 全局（@require 引入；运行时仅绑定 executor↔agent + 注册内核 hooks，不自动启动其余工具）----
-  // 启动编排完全交给 tool_manager：宿主层注入预装宇宙（含环境层工具 gm_storage / ui），由 bootstrap 统一编排；
-  // 依赖关系只活在工具自身 deps 图（hooks ← gm_storage ← ui），由 registerAll 内部拓扑序处理，内核不另设优先级层。
+  // ---- basement IIFE 全局（CDN <script> 引入；运行时仅绑定 executor↔agent + 注册内核 hooks，不自动启动其余工具）----
+  // 启动编排完全交给 tool_manager：宿主层注入预装宇宙（含环境层工具 storage / ui），由 bootstrap 统一编排；
+  // 依赖关系只活在工具自身 deps 图（hooks ← storage ← ui），由 registerAll 内部拓扑序处理，内核不另设优先级层。
   // 钩子能力（installHook / uninstallToolHooks / wrapHook）不再作为散装全局暴露，
   // 统一经 agent.tools.get('hooks') 取回 HooksTool 后调用（标准 tool 接口，避免框架不清的调用声明）。
   const MiniAgent: {
