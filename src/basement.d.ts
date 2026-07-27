@@ -84,6 +84,7 @@ declare global {
     sendMessage(text: string): Promise<void>;
     chatStop(): void;
     chat: { sendMessage(text: string): Promise<void> };
+    dispose(): void; // 释放：停引擎、清队列/消息、移除 UI、复位输出槽（借鉴 page-agent dispose；basement-0.2.8+）
   };
 
   // ---- basement IIFE 全局（CDN <script> 引入；运行时仅绑定 executor↔agent + 注册内核 hooks，不自动启动其余工具）----

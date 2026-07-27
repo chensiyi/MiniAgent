@@ -841,6 +841,35 @@
 	//#endregion
 	//#region src/bootstrap.ts
 	var { agent, toolManager, defaultTools } = MiniAgent;
+	var currentScript = document.currentScript;
+	var currentScriptURL = currentScript?.src ? new URL(currentScript.src) : null;
+	var autoInit = currentScriptURL?.searchParams.get("autoInit") !== "false";
+	var CONFIG_OVERRIDE_KEYS = [
+		"model",
+		"baseURL",
+		"apiKey",
+		"lang",
+		"systemPrompt",
+		"reasoningEffort"
+	];
+	function applyUrlConfig() {
+		if (!currentScriptURL) return;
+		const override = {};
+		for (const k of CONFIG_OVERRIDE_KEYS) {
+			const v = currentScriptURL.searchParams.get(k);
+			if (v !== null) override[k] = v;
+		}
+		if (Object.keys(override).length) agent.config = {
+			...agent.config,
+			...override
+		};
+	}
+	if (autoInit) {
+		const existing = globalThis.agent;
+		if (existing && typeof existing.dispose === "function") try {
+			existing.dispose();
+		} catch {}
+	}
 	var appEl = document.getElementById("app");
 	function setBootStatus(text) {
 		if (appEl) appEl.textContent = text;
@@ -859,6 +888,7 @@
 	async function main() {
 		try {
 			console.log("[MiniAgent][boot] ① 启动");
+			applyUrlConfig();
 			const hooksTool = defaultTools.find((t) => t.name === "hooks");
 			const bmDefaultTools = defaultTools.filter((t) => t.name !== "run_js");
 			const baseTools = [storageTool, hooksTool];
@@ -894,22 +924,28 @@
 			} catch (e) {
 				console.warn("[MiniAgent][boot] 读取本地 disabledTools 失败:", e);
 			}
-			await toolManager.bootstrap();
-			console.log("[MiniAgent][boot] ③ bootstrap() 完成");
-			await domReady();
-			globalThis.agent = agent;
-			window.MiniAgent = MiniAgent;
-			const stamp = "ok@" + Date.now();
-			localStorage.setItem("miniagent:__boot_test__", stamp);
-			const got = localStorage.getItem("miniagent:__boot_test__");
-			const rootEl = document.getElementById("miniagent-root");
-			console.log("[MiniAgent][boot] ④ 全部完成", {
-				storageTest: got,
-				origin: location.origin,
-				hasRoot: !!rootEl,
-				hasLauncher: !!document.getElementById("miniagent-launcher"),
-				launcherDisplay: document.getElementById("miniagent-launcher")?.style.display
-			});
+			if (autoInit) {
+				await toolManager.bootstrap();
+				console.log("[MiniAgent][boot] ③ bootstrap() 完成");
+				await domReady();
+				globalThis.agent = agent;
+				window.MiniAgent = MiniAgent;
+				const stamp = "ok@" + Date.now();
+				localStorage.setItem("miniagent:__boot_test__", stamp);
+				const got = localStorage.getItem("miniagent:__boot_test__");
+				const rootEl = document.getElementById("miniagent-root");
+				console.log("[MiniAgent][boot] ④ 全部完成", {
+					storageTest: got,
+					origin: location.origin,
+					hasRoot: !!rootEl,
+					hasLauncher: !!document.getElementById("miniagent-launcher"),
+					launcherDisplay: document.getElementById("miniagent-launcher")?.style.display
+				});
+			} else {
+				globalThis.agent = agent;
+				window.MiniAgent = MiniAgent;
+				console.log("[MiniAgent][boot] autoInit=false，跳过自动 bootstrap；可手动 MiniAgent.toolManager.bootstrap()");
+			}
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e);
 			setBootStatus("❌ MiniAgent 启动失败: " + msg);
